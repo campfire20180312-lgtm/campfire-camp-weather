@@ -347,7 +347,7 @@ def compose(camps, locs, elev, generated):
     check(out_camps)
     return {
         "generated": generated,
-        "source": "中央氣象署開放資料 F-D0047-091 鄉鎮天氣預報（未來1週）",
+        "source": "中央氣象署開放資料 鄉鎮天氣預報（各縣市未來1週，F-D0047 系列）",
         "lapse": LAPSE,
         "count": len(out_camps),
         "camps": out_camps,
