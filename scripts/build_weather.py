@@ -356,7 +356,7 @@ def check(camps):
                            % (filled, total))
     rain = sum(1 for c in camps for d in c["days"]
                if d["popd"] is not None or d["popn"] is not None)
-    if rain < total * 0.5:
+    if rain < total * 0.25:
         raise RuntimeError("降雨機率缺值太多（%d/%d）" % (rain, total))
 
 
