@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive,nosnippet">
+<meta name="referrer" content="no-referrer">
+<title>營地天氣測試頁（未公開）</title>
+<style>html,body{margin:0;background:#f6f4f1}@media(prefers-color-scheme:dark){:root:not([data-theme=light]),:root:not([data-theme=light]) body{background:#14120f}}:root[data-theme=dark],:root[data-theme=dark] body{background:#14120f}</style>
+</head>
+<body>
+<style>
+.cw{--bg:#f6f4f1;--card:#fff;--ink:#1c1917;--dim:#6b6560;--line:#e5ddd4;--acc:#ef6c1f;--acc-soft:#fff1e6;
+ --cold:#2f6fb5;--cool:#4a9ac4;--mild:#3f9a6a;--warm:#d98324;--hot:#c9452f;--rain:#2f6fb5;
+ --shadow:0 1px 2px rgba(28,25,23,.06),0 8px 24px rgba(28,25,23,.05);
+ color-scheme:light dark;background:var(--bg);color:var(--ink);
+ font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+ line-height:1.6;-webkit-text-size-adjust:100%;padding:0 0 48px;margin:0 auto;max-width:960px}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .cw{
+ --bg:#14120f;--card:#1e1b17;--ink:#f2ede7;--dim:#a49c93;--line:#332e28;
+ --acc:#ff8a3d;--acc-soft:#3a2415;--cold:#7fb3e8;--cool:#8fc9e0;--mild:#79c79b;--warm:#f0b060;--hot:#f08268;
+ --rain:#7fb3e8;--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3)}}
+:root[data-theme=dark] .cw{
+ --bg:#14120f;--card:#1e1b17;--ink:#f2ede7;--dim:#a49c93;--line:#332e28;
+ --acc:#ff8a3d;--acc-soft:#3a2415;--cold:#7fb3e8;--cool:#8fc9e0;--mild:#79c79b;--warm:#f0b060;--hot:#f08268;
+ --rain:#7fb3e8;--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3)}
+.cw *{box-sizing:border-box}
+.cw :focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:8px}
+.cw h2,.cw h3,.cw h4{margin:0;line-height:1.3;font-weight:700}
+.cw button{font:inherit;color:inherit;cursor:pointer}
+.cw-head{padding:22px 16px 6px}
+.cw-head h2{font-size:22px;letter-spacing:-.01em}
+.cw-sub{color:var(--dim);font-size:14px;margin:6px 0 0}
+.cw-meta{font-size:12px;color:var(--dim);margin-top:10px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.cw-dot{width:6px;height:6px;border-radius:50%;background:var(--mild);display:inline-block;margin-right:5px}
+.cw-dot.stale{background:var(--hot)}
+.cw-warnbar{margin:10px 16px 0;padding:9px 12px;border-radius:10px;background:var(--acc-soft);
+ border:1px solid var(--acc);color:var(--ink);font-size:13px}
+.cw-panel{padding:0 16px}
+.cw-search{position:relative;margin-top:14px}
+.cw-search input{width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:12px;
+ background:var(--card);color:var(--ink);font-size:16px;outline:none}
+.cw-search input:focus{border-color:var(--acc)}
+.cw-chips{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 0}
+.cw-chip{padding:6px 11px;border-radius:999px;border:1px solid var(--line);background:var(--card);
+ font-size:13px;white-space:nowrap}
+.cw-chip[aria-pressed=true]{background:var(--acc);border-color:var(--acc);color:#fff}
+.cw-bar{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:14px 0 8px;
+ font-size:13px;color:var(--dim);flex-wrap:wrap}
+.cw-bar select{font:inherit;padding:6px 8px;border-radius:9px;border:1px solid var(--line);
+ background:var(--card);color:var(--ink)}
+.cw-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.cw-row{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 12px;
+ border:1px solid var(--line);border-radius:12px;background:var(--card);box-shadow:var(--shadow)}
+.cw-row .lo{margin-left:8px}
+@media (max-width:560px){.cw-row .lo{display:block;margin-left:0}}
+.cw-row:hover{border-color:var(--acc)}
+.cw-row .nm{font-weight:600;font-size:15px}
+.cw-row .lo{color:var(--dim);font-size:12.5px}
+.cw-row .grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cw-el{font-variant-numeric:tabular-nums;font-size:12.5px;padding:3px 8px;border-radius:8px;
+ background:var(--acc-soft);color:var(--acc);font-weight:700;white-space:nowrap}
+.cw-mini{font-size:12.5px;color:var(--dim);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.cw-more{margin:12px 0 0;width:100%;padding:10px;border-radius:12px;border:1px dashed var(--line);
+ background:transparent;color:var(--dim);font-size:13px}
+.cw-back{background:none;border:0;color:var(--acc);padding:14px 0 4px;font-size:14px;font-weight:600}
+.cw-title{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 10px;margin-top:2px}
+.cw-title h3{font-size:20px}
+.cw-tag{font-size:12.5px;color:var(--dim)}
+.cw-fix{margin:14px 0 0;padding:13px 14px;border-radius:14px;background:var(--card);
+ border:1px solid var(--line);box-shadow:var(--shadow);font-size:13.5px}
+.cw-fix b{color:var(--acc);font-variant-numeric:tabular-nums}
+.cw-fix .why{color:var(--dim);font-size:12.5px;margin-top:6px}
+.cw-days{display:grid;grid-template-columns:repeat(7,minmax(112px,1fr));gap:8px;margin:16px 0 0;
+ overflow-x:auto;padding-bottom:4px;scrollbar-width:thin}
+.cw-day{border:1px solid var(--line);border-radius:14px;background:var(--card);padding:11px 10px;
+ text-align:center;box-shadow:var(--shadow);cursor:pointer}
+.cw-day[aria-pressed=true]{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc) inset}
+.cw-day .dt{font-size:12px;color:var(--dim)}
+.cw-day .wk{font-weight:700;font-size:13px}
+.cw-day svg{margin:6px auto 2px;display:block}
+.cw-temp{font-variant-numeric:tabular-nums;font-size:17px;font-weight:700;letter-spacing:-.02em}
+.cw-temp .n{color:var(--cold)}
+.cw-temp .sep{color:var(--dim);font-weight:400;margin:0 2px}
+.cw-raw{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+.cw-kv{display:flex;justify-content:center;gap:8px;font-size:11.5px;color:var(--dim);margin-top:5px;
+ font-variant-numeric:tabular-nums}
+.cw-kv .r{color:var(--rain)}
+.cw-sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:16px 0 0}
+.cw-stat{border:1px solid var(--line);border-radius:14px;background:var(--card);padding:12px 13px;
+ box-shadow:var(--shadow)}
+.cw-stat .k{font-size:12px;color:var(--dim)}
+.cw-stat .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em;margin-top:2px}
+.cw-stat .n{font-size:12px;color:var(--dim);margin-top:2px}
+.cw-gear{margin:22px 0 0}
+.cw-gear h4{font-size:16px;margin-bottom:4px}
+.cw-gear .lead{color:var(--dim);font-size:13px;margin:4px 0 12px}
+.cw-item{border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:12px;
+ background:var(--card);padding:12px 14px;margin-bottom:8px;box-shadow:var(--shadow)}
+.cw-item.warn{border-left-color:var(--hot)}
+.cw-item.off{border-left-color:var(--line);opacity:.72}
+.cw-item.off .t span{color:var(--dim)}
+.cw-item .t{font-weight:700;font-size:14.5px;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.cw-item .t span{font-weight:700;color:var(--acc);font-variant-numeric:tabular-nums;font-size:14px;text-align:right}
+.cw-item .d{font-size:13.5px;margin-top:5px}
+.cw-item .w{font-size:12.5px;color:var(--dim);margin-top:5px}
+.cw-note{margin:24px 0 0;font-size:12.5px;color:var(--dim)}
+.cw-note h4{font-size:13.5px;color:var(--ink);margin-bottom:6px}
+.cw-note ul{margin:0;padding-left:18px}
+.cw-note li{margin:3px 0}
+.cw-empty{padding:26px 4px;color:var(--dim);font-size:14px;text-align:center}
+@media (max-width:560px){
+ .cw-days{grid-template-columns:repeat(7,minmax(104px,1fr))}
+ .cw-head h2{font-size:19px}
+}
+</style>
+
+<div class="cw">
+  <div class="cw-head">
+    <h2>營地天氣・裝備建議</h2>
+    <p class="cw-sub">氣象署鄉鎮預報是平地代表點的值。這裡把營地海拔的高度差算回去，再換成實際會冷到幾度、該帶什麼。</p>
+    <div class="cw-meta" id="cwMeta"></div>
+  </div>
+  <div id="cwWarn"></div>
+
+  <div class="cw-panel">
+    <section id="cwPick">
+      <div class="cw-search"><input id="cwQ" type="search" placeholder="搜尋營地名稱或鄉鎮" autocomplete="off"></div>
+      <div class="cw-chips" id="cwCounties"></div>
+      <div class="cw-bar">
+        <span id="cwCount"></span>
+        <label>排序
+          <select id="cwSort">
+            <option value="rain">未來三晚最不會下雨</option>
+            <option value="cold">夜裡最冷</option>
+            <option value="elev">海拔由高到低</option>
+            <option value="name">名稱</option>
+          </select>
+        </label>
+      </div>
+      <ul class="cw-list" id="cwList"></ul>
+      <button class="cw-more" id="cwMore" hidden>顯示更多</button>
+    </section>
+
+    <section id="cwDetail" hidden></section>
+  </div>
+</div>
+
+<script>
+(function(){
+  var WEATHER_URL = window.CAMP_WEATHER_URL || 'https://campfire20180312-lgtm.github.io/campfire-camp-weather/weather.json';
+  var DB_URL = 'https://campfiretw.com/camp-database/';
+  var PAGE = 40;
+  var state = {data:null, county:'', q:'', sort:'rain', shown:PAGE, camp:null, dayIdx:null};
+
+  var $ = function(id){ return document.getElementById(id); };
+  var esc = function(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); };
+  var num = function(v,d){ return (v===null||v===undefined||isNaN(v))?(d||'—'):v; };
+
+  /* ---------- 小工具 ---------- */
+  function beaufort(ms){
+    if(ms==null) return null;
+    var b=[0.3,1.6,3.4,5.5,8.0,10.8,13.9,17.2,20.8,24.5,28.5,32.7], i=0;
+    while(i<b.length && ms>=b[i]) i++;
+    return i;
+  }
+  function icon(txt){
+    var t = txt||'', c='';
+    var sun='<circle cx="12" cy="12" r="5"/><g stroke-linecap="round"><path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></g>';
+    var cloud='<path d="M7 18h10a4 4 0 0 0 .4-8 6 6 0 0 0-11.6 1.6A3.5 3.5 0 0 0 7 18z"/>';
+    if(/雷/.test(t)) c=cloud+'<path d="M12 19l-2 4h3l-1.5 3"/>';
+    else if(/雨/.test(t)) c=cloud+'<g stroke-linecap="round"><path d="M8.5 20.5l-1 2.5M12 20.5l-1 2.5M15.5 20.5l-1 2.5"/></g>';
+    else if(/陰/.test(t)) c=cloud;
+    else if(/多雲/.test(t)) c='<circle cx="8" cy="8" r="3.4"/>'+cloud;
+    else c=sun;
+    return '<svg width="26" height="26" viewBox="0 0 24 26" fill="none" stroke="currentColor" '+
+      'stroke-width="1.6" aria-hidden="true" style="color:var(--dim)">'+c+'</svg>';
+  }
+  function wk(dt){
+    var d=new Date(dt+'T00:00:00+08:00');
+    return ['日','一','二','三','四','五','六'][d.getDay()];
+  }
+  function md(dt){ var p=dt.split('-'); return (+p[1])+'/'+(+p[2]); }
+  function tempColor(t){
+    if(t==null) return 'var(--dim)';
+    if(t<=5) return 'var(--cold)'; if(t<=12) return 'var(--cool)';
+    if(t<=22) return 'var(--mild)'; if(t<=29) return 'var(--warm)'; return 'var(--hot)';
+  }
+  function nightsOf(c){ return c.days || []; }
+  function coldestIdx(c){
+    var days=nightsOf(c), k=null;
+    days.forEach(function(d,i){
+      var v = d.feel!=null?d.feel:d.clo;
+      if(v!=null && (k===null || v < (days[k].feel!=null?days[k].feel:days[k].clo))) k=i;
+    });
+    return k===null?0:k;
+  }
+  function rainScore(c){
+    var d=nightsOf(c).slice(0,3), s=0, n=0;
+    d.forEach(function(x){ [x.popd,x.popn].forEach(function(p){ if(p!=null){s+=p;n++;} }); });
+    return n? s/n : 999;
+  }
+
+  /* ---------- 裝備建議 ---------- */
+  function pad(t){
+    if(t==null) return null;
+    if(t>=20) return {v:'R 1 以下', d:'夏季夜溫，睡墊選厚度舒適度為主，保溫不是重點。'};
+    if(t>=15) return {v:'R 1–2', d:'一般充氣墊或蛋殼泡棉就夠。'};
+    if(t>=10) return {v:'R 2–3', d:'地面已經會抽走體溫，薄墊會整夜背後發涼。'};
+    if(t>=5)  return {v:'R 3–4', d:'台灣中海拔冬天的標準值，睡袋再暖，墊不夠一樣冷。'};
+    if(t>=0)  return {v:'R 4–5', d:'接近結霜，睡墊是保暖的第一道，不是第二道。'};
+    return {v:'R 5 以上', d:'或用 R3 充氣墊疊一張蛋殼泡棉，疊加的 R 值可以相加。'};
+  }
+  function bag(t){
+    if(t==null) return null;
+    var c = Math.floor((t-3));
+    var txt = c>=15 ? '15°C 以上（或睡袋當被蓋）' : (c+'°C 以下');
+    return {v:'舒適溫標 '+txt, d:'看的是 comfort（舒適），不是 limit（下限）或 extreme（極限）——後兩個是撐住不失溫的數字，不是睡得著的數字。'};
+  }
+  function advise(c, idx){
+    var d = nightsOf(c)[idx] || {};
+    var tmin = d.clo, feel = d.feel!=null?d.feel:d.clo;
+    var hasPop = !(d.popd==null && d.popn==null);
+    var pop = hasPop ? Math.max(d.popd==null?0:d.popd, d.popn==null?0:d.popn) : null;
+    var ws = Math.max(d.wsd==null?0:d.wsd, d.wsn==null?0:d.wsn);
+    var bf = beaufort(ws), out=[];
+    // 睡墊、睡袋、熱源看的是氣溫，不是風寒體感：人在帳篷裡，風寒對睡眠溫度影響很小
+    var P = pad(tmin), B = bag(tmin);
+    if(P) out.push({t:'睡墊 R 值', v:P.v, d:P.d, w:'依當晚營地氣溫 '+num(tmin)+'°C 推算；地面通常比氣溫再冷一點，草地與碎石地差更多。'});
+    if(B) out.push({t:'睡袋', v:B.v, d:B.d, w:'抓氣溫再往下留 3 度緩衝。睡袋看的是帳內氣溫，外面的風寒體感不用算進來；體質怕冷、女性或睡姿不動的人，再往下抓 3 到 5 度。'});
+
+    if(tmin!=null && tmin<5) out.push({t:'暖爐', v:'明顯需要', warn:true,
+      d:'這個溫度沒有熱源，半夜大概會醒。但暖爐不能整夜開、不能在密閉帳內開。',
+      w:'一氧化碳無色無味，帳篷內用瓦斯暖爐或爐具是台灣露營意外的主因。要用就配一氧化碳警報器、開通風口、睡前關掉。'});
+    else if(tmin!=null && tmin<10) out.push({t:'暖爐', v:'有幫助，非必要', warn:true,
+      d:'睡前開一下把帳內溫度拉起來就好，睡著後靠睡袋與睡墊。',
+      w:'一樣要配一氧化碳警報器、保持通風，睡前務必關閉。'});
+    else out.push({t:'暖爐', v:'不需要', off:true, d:'這個溫度帶暖爐只是多背重量。', w:''});
+
+    if(tmin!=null && tmin<15){
+      var pw = c.pw===1 ? '這個營地備註有提到供電' : (c.pw===-1 ? '這個營地備註提到沒有電' : '這個營地的供電狀況資料庫沒記，訂位前先問');
+      out.push({t:'電毯', v: tmin<10?'建議帶':'可以帶', d:'電毯是最省事的熱源，睡前 30 分鐘預熱睡袋，比暖爐安全。'+(c.pw===-1?'沒有電就改用熱水袋或暖暖包塞睡袋腳底。':''),
+        w:pw+'。一般 AC 電毯約 40–60W，行動電源要能穩定輸出這個瓦數；車宿可用 12V 車用款。'});
+    } else {
+      out.push({t:'電毯', v:'不需要', off:true, d:'這個夜溫用不到。', w:''});
+    }
+
+    if(!hasPop) out.push({t:'雨備', v:'沒有降雨機率', off:true,
+      d:'氣象署的一週預報只發布未來三天的 12 小時降雨機率，第四天之後沒有這個數字。',
+      w:'出發前一兩天再回來看，那時候這一天就會有降雨機率了。天氣現象欄位仍可參考。'});
+    else if(pop>=70) out.push({t:'雨備', v:'降雨機率 '+pop+'%', warn:true,
+      d:'天幕或客廳帳當主要活動空間，地布要內折不外露，多帶一雙襪子與一套換洗。',
+      w:'連日下雨時，濕掉的睡袋保暖力會掉一大截，羽絨尤其明顯，這種週末帶化纖睡袋反而安全。'});
+    else if(pop>=40) out.push({t:'雨備', v:'降雨機率 '+pop+'%',
+      d:'天幕還是要帶，午後雷陣雨型態居多，收帳前留意。', w:''});
+    else out.push({t:'雨備', v:'降雨機率 '+pop+'%', off:true, d:'雨具帶著就好，不用為它調整裝備。', w:''});
+
+    if(bf!=null && bf>=6) out.push({t:'風', v:'蒲福 '+bf+' 級／'+num(ws)+' m/s', warn:true,
+      d:'這個風不要搭天幕。營位挑背風側，帳篷所有營繩都要拉，地釘換鍛造釘。',
+      w:'高海拔營地的實際風常比鄉鎮預報更強，稜線與埡口位置尤其明顯。這種預報值得考慮改期。'});
+    else if(bf!=null && bf>=4) out.push({t:'風', v:'蒲福 '+bf+' 級／'+num(ws)+' m/s',
+      d:'天幕壓低搭、營繩拉滿，地釘至少 25 公分以上。', w:'風會把體感再往下拉，上面的體感溫度已經算進去了。'});
+    else out.push({t:'風', v:'蒲福 '+num(bf)+' 級／'+num(ws)+' m/s', off:true, d:'風不是問題。', w:''});
+
+    if(feel!=null && feel<10) out.push({t:'保暖細節', v:feel<5?'羽絨＋毛帽＋厚襪':'毛帽與厚襪',
+      d:'睡覺戴毛帽跟換一雙乾的厚襪，效果比多加一件外套明顯。'+(feel<5?'再帶暖暖包貼腰後。':''),
+      w:'睡前別穿白天流過汗的衣服進睡袋，濕衣服是整夜發冷的常見原因。'});
+
+    if(c.e>=1200 && d.chi!=null && d.clo!=null) out.push({t:'日夜溫差', v:Math.round(d.chi-d.clo)+'°C',
+      d:'白天 '+num(d.chi)+'°C、夜裡 '+num(d.clo)+'°C，穿脫層次要備齊，中層刷毛不要省。', w:''});
+    return out;
+  }
+
+  /* ---------- 畫面 ---------- */
+  function renderMeta(){
+    var d=state.data, m=$('cwMeta');
+    var ts = d.generated ? d.generated.replace('T',' ').slice(0,16) : '—';
+    var stale=false;
+    if(d.generated){
+      var age=(Date.now()-new Date(d.generated).getTime())/36e5;
+      stale = age>36;
+    }
+    m.innerHTML = '<span><i class="cw-dot'+(stale?' stale':'')+'"></i>資料更新 '+esc(ts)+'</span>'+
+      '<span>'+esc(d.source||'')+'</span>'+
+      '<span>遞減率 '+num(d.lapse)+'°C／100m</span>'+
+      '<span>'+num(d.count)+' 個營地</span>';
+    var w=$('cwWarn');
+    if(d.demo) w.innerHTML='<div class="cw-warnbar">目前顯示的是<b>示範資料</b>，不是真實預報。接上氣象署授權碼、產生 weather.json 之後就會換成實際預報。</div>';
+    else if(stale) w.innerHTML='<div class="cw-warnbar">資料已超過 36 小時沒更新，請以氣象署官網為準。</div>';
+  }
+
+  function renderCounties(){
+    var seen=[], box=$('cwCounties');
+    state.data.camps.forEach(function(c){ if(seen.indexOf(c.ct)<0) seen.push(c.ct); });
+    box.innerHTML = ['<button class="cw-chip" data-ct="" aria-pressed="true">全部</button>']
+      .concat(seen.map(function(ct){
+        return '<button class="cw-chip" data-ct="'+esc(ct)+'" aria-pressed="false">'+esc(ct)+'</button>';
+      })).join('');
+    box.addEventListener('click', function(e){
+      var b=e.target.closest('.cw-chip'); if(!b) return;
+      state.county = b.dataset.ct; state.shown = PAGE;
+      [].forEach.call(box.children,function(x){ x.setAttribute('aria-pressed', x===b?'true':'false'); });
+      renderList();
+    });
+  }
+
+  function filtered(){
+    var q=state.q.trim(), out=state.data.camps.filter(function(c){
+      if(state.county && c.ct!==state.county) return false;
+      if(q && (c.n+c.ct+c.d).indexOf(q)<0) return false;
+      return true;
+    });
+    var s=state.sort;
+    out.sort(function(a,b){
+      if(s==='elev') return (b.e||0)-(a.e||0);
+      if(s==='name') return a.n.localeCompare(b.n,'zh-Hant');
+      if(s==='cold'){
+        var av=nightsOf(a)[coldestIdx(a)], bv=nightsOf(b)[coldestIdx(b)];
+        return ((av&&av.feel)||99)-((bv&&bv.feel)||99);
+      }
+      return rainScore(a)-rainScore(b);
+    });
+    return out;
+  }
+
+  function renderList(){
+    var rows=filtered(), ul=$('cwList');
+    $('cwCount').textContent = rows.length+' 個營地';
+    if(!rows.length){ ul.innerHTML='<li class="cw-empty">沒有符合的營地</li>'; $('cwMore').hidden=true; return; }
+    var slice=rows.slice(0,state.shown);
+    ul.innerHTML = slice.map(function(c){
+      var i=coldestIdx(c), d=nightsOf(c)[i]||{};
+      var right = state.sort==='rain'
+        ? '三晚均雨 '+Math.round(rainScore(c))+'%'
+        : '最冷夜 '+num(d.feel!=null?d.feel:d.clo)+'°C';
+      return '<li><button class="cw-row" data-n="'+esc(c.n)+'">'+
+        '<span class="cw-el">'+num(c.e)+'m</span>'+
+        '<span class="grow"><span class="nm">'+esc(c.n)+'</span>'+
+        '<span class="lo">'+esc(c.ct)+' '+esc(c.d)+'</span></span>'+
+        '<span class="cw-mini">'+right+'</span></button></li>';
+    }).join('');
+    $('cwMore').hidden = rows.length<=state.shown;
+  }
+
+  function renderDetail(){
+    var c=state.camp, days=nightsOf(c), idx=state.dayIdx==null?coldestIdx(c):state.dayIdx;
+    var d=days[idx]||{};
+    var drop = c.dh!=null ? (c.dh*(state.data.lapse||0.6)/100) : null;
+    var html = '<button class="cw-back" id="cwBack">← 換一個營地</button>'+
+      '<div class="cw-title"><h3>'+esc(c.n)+'</h3>'+
+      '<span class="cw-tag">'+esc(c.ct)+' '+esc(c.d)+'　海拔 '+num(c.e)+' 公尺</span></div>';
+
+    html += '<div class="cw-fix">對應氣象署<b>'+esc(c.tw||'—')+'</b>的鄉鎮預報點（海拔 '+num(c.te)+' 公尺，'+
+      '直線距離約 '+num(c.km)+' 公里）。營地比預報點高 <b>'+num(c.dh)+'</b> 公尺，'+
+      '氣溫已下修 <b>'+(drop==null?'—':drop.toFixed(1))+'°C</b>。'+
+      '<div class="why">下面每張卡的大字是修正後的營地溫度，灰色小字是氣象署鄉鎮預報的原值。'+
+      '風速與降雨機率沿用鄉鎮預報，沒有做海拔修正。</div></div>';
+
+    html += '<div class="cw-days">'+days.map(function(x,i){
+      var night = x.feel!=null?x.feel:x.clo;
+      return '<button class="cw-day" data-i="'+i+'" aria-pressed="'+(i===idx?'true':'false')+'">'+
+        '<div class="dt">'+md(x.dt)+'</div><div class="wk">週'+wk(x.dt)+'</div>'+
+        icon(x.wxd||x.wxn)+
+        '<div class="cw-temp"><span style="color:'+tempColor(x.chi)+'">'+num(x.chi)+'</span>'+
+        '<span class="sep">/</span><span style="color:'+tempColor(x.clo)+'">'+num(x.clo)+'</span></div>'+
+        '<div class="cw-raw" title="氣象署鄉鎮預報原值">署 '+num(x.hi)+'/'+num(x.lo)+'</div>'+
+        '<div class="cw-kv"><span class="r">'+(x.popd==null&&x.popn==null?'雨—':num(Math.max(x.popd||0,x.popn||0))+'%')+'</span>'+
+        '<span>'+num(x.wsn)+'m/s</span></div>'+
+        '<div class="cw-kv"><span>體感 '+num(night)+'°</span></div>'+
+        '</button>';
+    }).join('')+'</div>'+
+      '<div style="font-size:12px;color:var(--dim);margin-top:6px">'+
+      '大字為修正後的營地日夜溫度，可左右滑動並點選任一天</div>';
+
+    var bf=beaufort(Math.max(d.wsd||0,d.wsn||0));
+    html += '<div class="cw-sum">'+
+      stat('這晚營地低溫', num(d.clo)+'°C', '氣象署鄉鎮值 '+num(d.lo)+'°C')+
+      stat('加上風寒的體感', num(d.feel)+'°C', d.feel!=null&&d.clo!=null&&d.feel<d.clo-0.4 ? '風把體感再拉低 '+(d.clo-d.feel).toFixed(1)+'°C' : (d.clo!=null&&d.clo>10 ? '氣溫 10°C 以上，風寒公式不適用' : '風不夠強，沒有風寒效應'))+
+      stat('降雨機率', d.popd==null&&d.popn==null?'無資料':num(Math.max(d.popd||0,d.popn||0))+'%',
+        d.popd==null&&d.popn==null?'氣象署只發布未來三天的降雨機率':'白天 '+num(d.popd)+'%　夜間 '+num(d.popn)+'%')+
+      stat('風速', num(Math.max(d.wsd||0,d.wsn||0))+' m/s', '蒲福 '+num(bf)+' 級')+
+      '</div>';
+
+    html += '<div class="cw-gear"><h4>這晚的裝備建議</h4>'+
+      '<p class="lead">以 '+md(d.dt||'')+'（週'+(d.dt?wk(d.dt):'')+'）夜間推算：營地氣溫 '+num(d.clo)+
+      '°C、戶外體感 '+num(d.feel)+'°C。睡墊與睡袋看氣溫，衣著與風看體感。點上面任一天可以換算那一晚。</p>'+
+      advise(c, idx).map(function(g){
+        return '<div class="cw-item'+(g.warn?' warn':'')+(g.off?' off':'')+'">'+
+          '<div class="t">'+esc(g.t)+'<span>'+esc(g.v)+'</span></div>'+
+          '<div class="d">'+esc(g.d)+'</div>'+
+          (g.w?'<div class="w">'+esc(g.w)+'</div>':'')+'</div>';
+      }).join('')+'</div>';
+
+    html += '<div class="cw-note"><h4>這個換算怎麼來的</h4><ul>'+
+      '<li>氣象署鄉鎮預報給的是該鄉鎮一個代表點的值，代表點多半設在人口聚集的低海拔位置，'+
+      '所以山上營地的實際溫度會比預報低。</li>'+
+      '<li>修正方式：用營地海拔減去代表點海拔，每 100 公尺降 '+num(state.data.lapse)+'°C。'+
+      '乾空氣約降 1 度、飽和空氣約降 0.5 度，台灣山區偏濕，這個值是折衷。</li>'+
+      '<li>體感用風寒公式（氣溫 10°C 以下、風速 1.3 m/s 以上才適用），不含濕度與日照。'+
+      '風寒算的是空曠無遮蔽的狀況，林間、背風或有擋風牆的營位會比這個數字緩和。</li>'+
+      '<li>氣象署一週預報只發布未來三天的 12 小時降雨機率，第四天之後那一格會是空的。</li>'+
+      '<li>晴朗無風的夜晚，山谷與盆地型營地會因為輻射冷卻再低 2 到 3 度，這個換算抓不到。'+
+      '同理，雲層厚的夜晚會比換算值暖。</li>'+
+      '<li>這是推估，不是官方預報。出發前請以中央氣象署與營地現場資訊為準。</li>'+
+      '</ul></div>';
+
+    html += '<p class="cw-note" style="margin-top:14px">這個營地的費用、電話與評分在'+
+      '<a href="'+DB_URL+'" style="color:var(--acc)">平價營地資料庫</a>；'+
+      '出發前建議再對一次<a href="https://www.cwa.gov.tw/V8/C/W/Town/Town.html" '+
+      'style="color:var(--acc)" rel="nofollow">中央氣象署鄉鎮預報</a>。</p>';
+
+    var el=$('cwDetail'); el.innerHTML=html; el.hidden=false; $('cwPick').hidden=true;
+    $('cwBack').onclick=function(){ state.camp=null; state.dayIdx=null; el.hidden=true;
+      $('cwPick').hidden=false; history.replaceState(null,'',location.pathname+location.search); };
+    var strip=el.querySelector('.cw-days');
+    strip.addEventListener('click',function(e){
+      var b=e.target.closest('.cw-day'); if(!b) return;
+      state.dayIdx=+b.dataset.i; renderDetail();
+    });
+    var sel=strip.querySelector('.cw-day[aria-pressed=true]');
+    if(sel && strip.scrollWidth>strip.clientWidth){
+      strip.scrollLeft = Math.max(0, sel.offsetLeft - strip.clientWidth/2 + sel.offsetWidth/2);
+    }
+  }
+  function stat(k,v,n){
+    return '<div class="cw-stat"><div class="k">'+esc(k)+'</div><div class="v">'+esc(v)+
+      '</div><div class="n">'+esc(n)+'</div></div>';
+  }
+
+  function open(name){
+    var c=state.data.camps.filter(function(x){ return x.n===name; })[0];
+    if(!c) return;
+    state.camp=c; state.dayIdx=null; renderDetail();
+    try{ history.replaceState(null,'','#camp='+encodeURIComponent(name)); }catch(e){}
+  }
+
+  /* ---------- 啟動 ---------- */
+  function boot(data){
+    state.data=data;
+    renderMeta(); renderCounties(); renderList();
+    $('cwQ').addEventListener('input',function(e){ state.q=e.target.value; state.shown=PAGE; renderList(); });
+    $('cwSort').addEventListener('change',function(e){ state.sort=e.target.value; renderList(); });
+    $('cwMore').addEventListener('click',function(){ state.shown+=PAGE; renderList(); });
+    $('cwList').addEventListener('click',function(e){
+      var b=e.target.closest('.cw-row'); if(b) open(b.dataset.n);
+    });
+    var m=/#camp=([^&]+)/.exec(location.hash);
+    if(m){ try{ open(decodeURIComponent(m[1])); }catch(e){} }
+  }
+
+  function fail(msg){
+    $('cwWarn').innerHTML='<div class="cw-warnbar">讀不到天氣資料（'+esc(msg)+'）。'+
+      '嘗試讀取的網址是 '+esc(WEATHER_URL)+'。'+
+      '如果這是在編輯器的預覽視窗看到的，發佈後再看一次實際頁面。</div>';
+  }
+  function ready(fn){
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',fn);
+    else fn();
+  }
+  fetch(WEATHER_URL,{cache:'no-cache'}).then(function(r){
+    if(!r.ok) throw new Error('HTTP '+r.status); return r.json();
+  }).then(function(d){ ready(function(){ boot(d); }); })
+  .catch(function(err){
+    ready(function(){
+      var inline=document.getElementById('cwDemoData');
+      if(inline){ boot(JSON.parse(inline.textContent)); }
+      else fail(err.message);
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
