@@ -58,11 +58,28 @@ NEEDED_ELEMENTS = [
 ]
 
 
+# ---------------------------------------------------------------- 連線
+
+def _get(url, params=None, timeout=120, tries=3):
+    """氣象署偶爾會連線逾時，重試三次再放棄。"""
+    last = None
+    for i in range(tries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except Exception as e:                  # noqa: BLE001
+            last = e
+            print("第 %d 次連線失敗：%s" % (i + 1, str(e)[:120]))
+            time.sleep(3 * (i + 1))
+    raise last
+
+
 # ---------------------------------------------------------------- 營地清單
 
 def load_camps(url=DB_URL):
     """從資料庫頁面內嵌的 base64 腳本裡取出 DATA 與 GEO。"""
-    html = requests.get(url, timeout=60).text
+    html = _get(url, None, 60).text
     m = re.search(r'var\s+S\s*=\s*"([A-Za-z0-9+/=]+)"', html)
     if not m:
         raise RuntimeError("找不到資料庫頁面的內嵌資料（var S）")
@@ -144,9 +161,7 @@ def _power_flag(note):
 
 def fetch_cwa(key, dataset, elements=NEEDED_ELEMENTS):
     params = {"Authorization": key, "format": "JSON", "ElementName": list(elements)}
-    r = requests.get(CWA_BASE + dataset, params=params, timeout=180)
-    r.raise_for_status()
-    js = r.json()
+    js = _get(CWA_BASE + dataset, params, 180).json()
     if str(js.get("success")).lower() not in ("true", "1"):
         raise RuntimeError("氣象署回傳 success != true：%s" % str(js)[:200])
     return js
@@ -160,9 +175,7 @@ def fetch_rain(key):
         "GeoInfo": ["Coordinates", "StationAltitude", "CountyName", "TownName"],
     }
     try:
-        r = requests.get(CWA_BASE + RAIN_DATASET, params=params, timeout=120)
-        r.raise_for_status()
-        js = r.json()
+        js = _get(CWA_BASE + RAIN_DATASET, params, 120).json()
     except Exception as e:                      # noqa: BLE001
         print("雨量站抓取失敗，這次略過：%s" % e)
         return [], None
