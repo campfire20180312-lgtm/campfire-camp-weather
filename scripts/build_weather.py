@@ -54,7 +54,8 @@ WARN_DATASET = "W-C0033-001"
 # 所以頁面上單獨標成「參考雨量」，不拿它決定風險等級。
 QPF_URL = "https://api.open-meteo.com/v1/forecast"
 QPF_BATCH = 80        # 一次帶幾個座標
-QPF_DAYS = 7
+# 氣象署只發一週，第八天之後只剩國際模式，所以抓 14 天，後面那幾天標成參考值
+QPF_DAYS = 14
 
 # 環境氣溫遞減率（°C / 100m）。營火部落資料庫既有說明用 0.6，這裡保持一致。
 # 乾空氣約 1.0、飽和空氣約 0.5，台灣山區多濕，0.55~0.65 都算合理。
@@ -238,7 +239,8 @@ def fetch_qpf(camps):
         params = {
             "latitude": ",".join("%.4f" % c["la"] for c in chunk),
             "longitude": ",".join("%.4f" % c["lo"] for c in chunk),
-            "daily": "precipitation_sum,precipitation_probability_max",
+            "daily": ("precipitation_sum,precipitation_probability_max,"
+                      "temperature_2m_max,temperature_2m_min,wind_speed_10m_max"),
             "timezone": "Asia/Taipei",
             "forecast_days": QPF_DAYS,
         }
@@ -254,13 +256,27 @@ def fetch_qpf(camps):
         for c, r in zip(chunk, rows):
             d = r.get("daily") or {}
             days = d.get("time") or []
-            mm = d.get("precipitation_sum") or []
             if not days:
                 continue
-            out[c["n"]] = {
-                "e": _i(r.get("elevation")),
-                "d": {days[k]: _r(mm[k], 1) for k in range(min(len(days), len(mm)))},
-            }
+
+            def col(name):
+                v = d.get(name) or []
+                return v + [None] * (len(days) - len(v))
+
+            mm, pop = col("precipitation_sum"), col("precipitation_probability_max")
+            tmx, tmn = col("temperature_2m_max"), col("temperature_2m_min")
+            ws = col("wind_speed_10m_max")
+            rec = {}
+            for k, day in enumerate(days):
+                rec[day] = {
+                    "mm": _r(mm[k], 1),
+                    "pop": _i(pop[k]),
+                    "hi": _r(tmx[k], 1),
+                    "lo": _r(tmn[k], 1),
+                    # Open-Meteo 的風速預設是 km/h，換成 m/s 才跟氣象署一致
+                    "ws": None if ws[k] is None else round(float(ws[k]) / 3.6, 1),
+                }
+            out[c["n"]] = {"e": _i(r.get("elevation")), "d": rec}
         time.sleep(0.6)
     print("預估雨量：%d/%d 個營地" % (len(out), len(camps)))
     return out
@@ -670,7 +686,7 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
                 "wsd": _r(d["wsd"], 1), "wsn": _r(wsn, 1),
                 "rh": _i(d["rh"]),
                 "wxd": d["wxd"], "wxn": d["wxn"],
-                "mm": qdays.get(d["date"]),
+                "mm": (qdays.get(d["date"]) or {}).get("mm"),
             })
         # 只輸出頁面真的會用到的欄位。座標、價格、分類、機車友善這些留在資料庫頁，
         # 不要在公開的 weather.json 裡再複製一份，避免整包被輕鬆抓走。
@@ -682,6 +698,29 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
         })
         if q.get("e") is not None:
             out_camps[-1]["qe"] = q["e"]
+        # 氣象署預報之後的日子，用國際模式補上去，標記 src=om，頁面上會標成參考值。
+        # 模式格點有自己的高度，所以遞減率是從格點高度修到營地高度，不是用鄉鎮預報點。
+        if qdays:
+            have = set(d["dt"] for d in days)
+            dh2 = (c["e"] or 0) - (q.get("e") if q.get("e") is not None else (c["e"] or 0))
+            for dt in sorted(qdays):
+                if dt in have:
+                    continue
+                v = qdays[dt]
+                hi, lo = v.get("hi"), v.get("lo")
+                chi = adjust(hi, dh2) if hi is not None else None
+                clo = adjust(lo, dh2) if lo is not None else None
+                ws = v.get("ws")
+                days.append({
+                    "dt": dt, "src": "om",
+                    "hi": None, "lo": None,
+                    "chi": _r(chi), "clo": _r(clo),
+                    "feel": _r(wind_chill(clo, ws)) if clo is not None else None,
+                    "popd": v.get("pop"), "popn": None,
+                    "wsd": ws, "wsn": ws,
+                    "rh": None, "wxd": None, "wxn": None,
+                    "mm": v.get("mm"),
+                })
         if rain:
             st = min(rain, key=lambda s: haversine(c["la"], c["lo"], s["lat"], s["lon"]))
             out_camps[-1]["rain"] = {
@@ -709,6 +748,8 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
         "warnCount": sum(1 for c in out_camps if c.get("warn")),
         "qpfSource": "Open-Meteo（ECMWF/GFS 等全球模式），非中央氣象署預報",
         "qpfCount": sum(1 for c in out_camps if any(d.get("mm") is not None for d in c["days"])),
+        "cwaDays": max((sum(1 for d in c["days"] if d.get("src") != "om") for c in out_camps),
+                       default=0),
         "count": len(out_camps),
         "camps": out_camps,
     }
