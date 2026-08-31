@@ -40,6 +40,12 @@ CWA_BASE = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/"
 DATASETS = ["F-D0047-%03d" % n for n in range(3, 88, 4)]
 DEM_URL = "https://api.opentopodata.org/v1/srtm30m"
 RAIN_DATASET = "O-A0002-001"   # 雨量觀測站-雨量資料（觀測，不是預報）
+# 地震報告：E-A0015-001 是顯著有感（規模較大、全臺性），E-A0016-001 是小區域有感。
+# 兩支都抓，合併後去重，用來判斷「七天內這一帶有沒有搖過」。
+EQ_DATASETS = ["E-A0015-001", "E-A0016-001"]
+EQ_DAYS = 7          # 只看幾天內的地震
+EQ_RADIUS_KM = 120   # 震央離營地多遠以內才納入
+EQ_STATION_KM = 25   # 測站離營地多近才拿它的震度當作營地的震度
 
 # 環境氣溫遞減率（°C / 100m）。營火部落資料庫既有說明用 0.6，這裡保持一致。
 # 乾空氣約 1.0、飽和空氣約 0.5，台灣山區多濕，0.55~0.65 都算合理。
@@ -215,6 +221,130 @@ def fetch_rain(key):
     return out, newest
 
 
+INTENSITY_MAP = {
+    "0級": 0, "1級": 1, "2級": 2, "3級": 3, "4級": 4,
+    "5弱": 5.0, "5強": 5.5, "6弱": 6.0, "6強": 6.5, "7級": 7.0,
+    # 舊制寫法，保險起見一併吃進來
+    "5級": 5.0, "6級": 6.0,
+}
+
+
+def _intensity(s):
+    if not s:
+        return None
+    s = str(s).strip()
+    if s in INTENSITY_MAP:
+        return INTENSITY_MAP[s]
+    m = re.match(r"^(\d)", s)
+    if not m:
+        return None
+    base = float(m.group(1))
+    if "弱" in s:
+        return base
+    if "強" in s:
+        return base + 0.5
+    return base
+
+
+def _eq_time(s):
+    """氣象署回傳的是台灣時間字串，格式偶爾帶 T，兩種都吃。"""
+    if not s:
+        return None
+    s = str(s).strip().replace("T", " ")[:19]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=TPE)
+        except ValueError:
+            continue
+    return None
+
+
+def fetch_quakes(key, now=None):
+    """抓最近幾天的有感地震。抓不到就回空的，不讓整批失敗。"""
+    now = now or datetime.now(TPE)
+    since = now - timedelta(days=EQ_DAYS)
+    out, seen = [], set()
+    for ds in EQ_DATASETS:
+        params = {
+            "Authorization": key, "format": "JSON", "limit": 100,
+            "timeFrom": since.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        try:
+            js = _get(CWA_BASE + ds, params, 120).json()
+        except Exception as e:                  # noqa: BLE001
+            print("地震 %s 抓取失敗，略過：%s" % (ds, e))
+            continue
+        rec = js.get("records", js)
+        raw = rec.get("Earthquake") or rec.get("earthquake") or []
+        for q in raw:
+            info = q.get("EarthquakeInfo") or q.get("earthquakeInfo") or {}
+            t = _eq_time(info.get("OriginTime"))
+            if t is None or t < since or t > now + timedelta(hours=1):
+                continue
+            epi = info.get("Epicenter") or {}
+            lat = _f(epi.get("EpicenterLatitude"))
+            lon = _f(epi.get("EpicenterLongitude"))
+            mag = _num((info.get("EarthquakeMagnitude") or {}).get("MagnitudeValue"))
+            if lat is None or lon is None:
+                continue
+            no = q.get("EarthquakeNo") or (info.get("OriginTime"), lat, lon)
+            if no in seen:
+                continue
+            seen.add(no)
+            stations = []
+            areas = ((q.get("Intensity") or {}).get("ShakingArea")) or []
+            for a in areas:
+                for st in a.get("EqStation") or []:
+                    slat = _f(st.get("StationLatitude"))
+                    slon = _f(st.get("StationLongitude"))
+                    iv = _intensity(st.get("SeismicIntensity"))
+                    if slat is None or slon is None or iv is None:
+                        continue
+                    stations.append((slat, slon, iv))
+            out.append({
+                "t": t, "lat": lat, "lon": lon,
+                "mag": None if mag is None else round(mag, 1),
+                "dep": _num(info.get("FocalDepth")),
+                "loc": epi.get("Location"),
+                "stations": stations,
+            })
+        time.sleep(0.4)
+    out.sort(key=lambda q: q["t"], reverse=True)
+    print("七天內有感地震 %d 筆%s" %
+          (len(out), ("，最大規模 %.1f" % max(q["mag"] or 0 for q in out)) if out else ""))
+    return out
+
+
+def camp_quake(c, quakes, now):
+    """挑出對這個營地最有意義的一筆：先看營地實際震度，沒有測站就看規模與距離。"""
+    best = None
+    for q in quakes:
+        km = haversine(c["la"], c["lo"], q["lat"], q["lon"])
+        if km > EQ_RADIUS_KM:
+            continue
+        local = None
+        for slat, slon, iv in q["stations"]:
+            if haversine(c["la"], c["lo"], slat, slon) <= EQ_STATION_KM:
+                local = iv if local is None else max(local, iv)
+        # 排序鍵：先比營地震度，再比規模，最後比距離近的
+        rank = (local if local is not None else -1, q["mag"] or 0, -km)
+        if best is None or rank > best[0]:
+            best = (rank, q, km, local)
+    if best is None:
+        return None
+    _, q, km, local = best
+    hours = (now - q["t"]).total_seconds() / 3600.0
+    return {
+        "mag": q["mag"],
+        "km": round(km, 1),
+        "dep": None if q["dep"] is None else round(q["dep"], 1),
+        "int": local,
+        "hr": int(round(hours)),
+        "t": q["t"].strftime("%Y-%m-%d %H:%M"),
+        "loc": q["loc"],
+    }
+
+
 def all_locations(key):
     """把 22 個縣市的鄉鎮預報全部抓下來合併。"""
     out = []
@@ -376,9 +506,11 @@ def build_days(loc):
     return out
 
 
-def compose(camps, locs, elev, generated, rain=None, rain_time=None):
+def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None):
     pts = [l for l in locs if l["lat"] and l["lon"]]
     rain = rain or []
+    quakes = quakes or []
+    now = datetime.now(TPE)
     out_camps = []
     for c in camps:
         near = min(pts, key=lambda l: haversine(c["la"], c["lo"], l["lat"], l["lon"]))
@@ -417,12 +549,18 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None):
                 "alt": None if st["alt"] is None else int(st["alt"]),
                 "r1": st["r1"], "r3": st["r3"], "r24": st["r24"], "r72": st["r72"],
             }
+        if quakes:
+            eq = camp_quake(c, quakes, now)
+            if eq:
+                out_camps[-1]["eq"] = eq
     check(out_camps)
     return {
         "generated": generated,
         "source": "中央氣象署開放資料 鄉鎮天氣預報（各縣市未來1週，F-D0047 系列）",
         "lapse": LAPSE,
         "rainObsTime": rain_time,
+        "eqDays": EQ_DAYS,
+        "eqCount": len(quakes),
         "count": len(out_camps),
         "camps": out_camps,
     }
@@ -462,6 +600,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "..", "weather.json"))
     ap.add_argument("--demo", action="store_true", help="不連網，產生示範資料")
     ap.add_argument("--inspect", action="store_true", help="只印出 API 結構")
+    ap.add_argument("--inspect-eq", action="store_true", help="只印出地震 API 結構")
     ap.add_argument("--refresh-elev", action="store_true", help="重新計算預報點海拔")
     args = ap.parse_args()
 
@@ -472,6 +611,28 @@ def main():
         key = os.environ.get("CWA_API_KEY")
         if not key:
             sys.exit("請先設定環境變數 CWA_API_KEY")
+        if args.inspect_eq:
+            since = (datetime.now(TPE) - timedelta(days=EQ_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
+            for ds in EQ_DATASETS:
+                r = _get(CWA_BASE + ds, {"Authorization": key, "format": "JSON",
+                                         "limit": 3, "timeFrom": since}, 120).json()
+                rec = r.get("records", r)
+                arr = rec.get("Earthquake") or rec.get("earthquake") or []
+                print("=== %s success=%s recordKeys=%s 筆數=%d"
+                      % (ds, r.get("success"), list(rec.keys()), len(arr)))
+                if arr:
+                    q = arr[0]
+                    info = q.get("EarthquakeInfo") or {}
+                    areas = ((q.get("Intensity") or {}).get("ShakingArea")) or []
+                    st = (areas[0].get("EqStation") or [{}])[0] if areas else {}
+                    print(json.dumps({"topKeys": list(q.keys()), "info": info,
+                                      "areaKeys": list(areas[0].keys()) if areas else None,
+                                      "stationSample": st},
+                                     ensure_ascii=False, indent=2)[:2500])
+            print("解析結果：%s" % json.dumps(
+                [{k: v for k, v in q.items() if k != "stations"} | {"stn": len(q["stations"])}
+                 for q in fetch_quakes(key)][:5], ensure_ascii=False, default=str))
+            return
         js = fetch_cwa(key, DATASETS[0])
         if args.inspect:
             rec = js.get("records", {})
@@ -487,9 +648,10 @@ def main():
         elev = town_elevations(locs, refresh=args.refresh_elev)
         camps = load_camps()
         rain, rain_time = fetch_rain(key)
+        quakes = fetch_quakes(key)
         payload = compose(camps, locs, elev,
                           datetime.now(TPE).isoformat(timespec="minutes"),
-                          rain, rain_time)
+                          rain, rain_time, quakes)
 
     out = os.path.abspath(args.out)
     with open(out, "w", encoding="utf-8") as f:
