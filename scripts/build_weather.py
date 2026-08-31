@@ -49,6 +49,12 @@ EQ_STATION_KM = 25   # 測站離營地多近才拿它的震度當作營地的震
 # 天氣特報：W-C0033-001 是各縣市目前的警特報總表（JSON），一次涵蓋豪大雨、陸上強風、
 # 低溫、高溫。W-C0033-003 那幾支只有 CAP 格式，解析麻煩且內容是同一批，不用。
 WARN_DATASET = "W-C0033-001"
+# 氣象署不發布逐日雨量（毫米）預報，只有機率與天氣現象文字。要給「大概會下幾毫米」
+# 只能用國際模式，這裡用 Open-Meteo（免金鑰）。全球模式對台灣山區地形雨會低估，
+# 所以頁面上單獨標成「參考雨量」，不拿它決定風險等級。
+QPF_URL = "https://api.open-meteo.com/v1/forecast"
+QPF_BATCH = 80        # 一次帶幾個座標
+QPF_DAYS = 7
 
 # 環境氣溫遞減率（°C / 100m）。營火部落資料庫既有說明用 0.6，這裡保持一致。
 # 乾空氣約 1.0、飽和空氣約 0.5，台灣山區多濕，0.55~0.65 都算合理。
@@ -222,6 +228,42 @@ def fetch_rain(key):
         })
     print("雨量站 %d 站，觀測時間 %s" % (len(out), newest))
     return out, newest
+
+
+def fetch_qpf(camps):
+    """逐日預估雨量（毫米）。抓不到就回空的，不讓整批失敗。"""
+    out = {}
+    for i in range(0, len(camps), QPF_BATCH):
+        chunk = camps[i:i + QPF_BATCH]
+        params = {
+            "latitude": ",".join("%.4f" % c["la"] for c in chunk),
+            "longitude": ",".join("%.4f" % c["lo"] for c in chunk),
+            "daily": "precipitation_sum,precipitation_probability_max",
+            "timezone": "Asia/Taipei",
+            "forecast_days": QPF_DAYS,
+        }
+        try:
+            js = _get(QPF_URL, params, 90).json()
+        except Exception as e:                  # noqa: BLE001
+            print("預估雨量抓取失敗，這次略過：%s" % e)
+            return {}
+        rows = js if isinstance(js, list) else [js]
+        if len(rows) != len(chunk):
+            print("預估雨量筆數對不上（%d vs %d），這批略過" % (len(rows), len(chunk)))
+            continue
+        for c, r in zip(chunk, rows):
+            d = r.get("daily") or {}
+            days = d.get("time") or []
+            mm = d.get("precipitation_sum") or []
+            if not days:
+                continue
+            out[c["n"]] = {
+                "e": _i(r.get("elevation")),
+                "d": {days[k]: _r(mm[k], 1) for k in range(min(len(days), len(mm)))},
+            }
+        time.sleep(0.6)
+    print("預估雨量：%d/%d 個營地" % (len(out), len(camps)))
+    return out
 
 
 def _norm_county(s):
@@ -597,17 +639,21 @@ def build_days(loc):
     return out
 
 
-def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None, warns=None):
+def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None, warns=None,
+            qpf=None):
     pts = [l for l in locs if l["lat"] and l["lon"]]
     rain = rain or []
     quakes = quakes or []
     warns = warns or {}
+    qpf = qpf or {}
     now = datetime.now(TPE)
     out_camps = []
     for c in camps:
         near = min(pts, key=lambda l: haversine(c["la"], c["lo"], l["lat"], l["lon"]))
         base = elev.get(near["name"], 0)
         dh = (c["e"] or 0) - base
+        q = qpf.get(c["n"]) or {}
+        qdays = q.get("d") or {}
         days = []
         for d in build_days(near):
             lo = d["lo"]
@@ -624,6 +670,7 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
                 "wsd": _r(d["wsd"], 1), "wsn": _r(wsn, 1),
                 "rh": _i(d["rh"]),
                 "wxd": d["wxd"], "wxn": d["wxn"],
+                "mm": qdays.get(d["date"]),
             })
         # 只輸出頁面真的會用到的欄位。座標、價格、分類、機車友善這些留在資料庫頁，
         # 不要在公開的 weather.json 裡再複製一份，避免整包被輕鬆抓走。
@@ -633,6 +680,8 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
             "km": round(haversine(c["la"], c["lo"], near["lat"], near["lon"]), 1),
             "days": days,
         })
+        if q.get("e") is not None:
+            out_camps[-1]["qe"] = q["e"]
         if rain:
             st = min(rain, key=lambda s: haversine(c["la"], c["lo"], s["lat"], s["lon"]))
             out_camps[-1]["rain"] = {
@@ -658,6 +707,8 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
         "eqDays": EQ_DAYS,
         "eqCount": len(quakes),
         "warnCount": sum(1 for c in out_camps if c.get("warn")),
+        "qpfSource": "Open-Meteo（ECMWF/GFS 等全球模式），非中央氣象署預報",
+        "qpfCount": sum(1 for c in out_camps if any(d.get("mm") is not None for d in c["days"])),
         "count": len(out_camps),
         "camps": out_camps,
     }
@@ -747,9 +798,10 @@ def main():
         rain, rain_time = fetch_rain(key)
         quakes = fetch_quakes(key)
         warns = fetch_warnings(key)
+        qpf = fetch_qpf(camps)
         payload = compose(camps, locs, elev,
                           datetime.now(TPE).isoformat(timespec="minutes"),
-                          rain, rain_time, quakes, warns)
+                          rain, rain_time, quakes, warns, qpf)
 
     out = os.path.abspath(args.out)
     with open(out, "w", encoding="utf-8") as f:
