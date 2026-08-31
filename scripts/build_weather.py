@@ -46,6 +46,9 @@ EQ_DATASETS = ["E-A0015-001", "E-A0016-001"]
 EQ_DAYS = 7          # 只看幾天內的地震
 EQ_RADIUS_KM = 120   # 震央離營地多遠以內才納入
 EQ_STATION_KM = 25   # 測站離營地多近才拿它的震度當作營地的震度
+# 天氣特報：W-C0033-001 是各縣市目前的警特報總表（JSON），一次涵蓋豪大雨、陸上強風、
+# 低溫、高溫。W-C0033-003 那幾支只有 CAP 格式，解析麻煩且內容是同一批，不用。
+WARN_DATASET = "W-C0033-001"
 
 # 環境氣溫遞減率（°C / 100m）。營火部落資料庫既有說明用 0.6，這裡保持一致。
 # 乾空氣約 1.0、飽和空氣約 0.5，台灣山區多濕，0.55~0.65 都算合理。
@@ -219,6 +222,94 @@ def fetch_rain(key):
         })
     print("雨量站 %d 站，觀測時間 %s" % (len(out), newest))
     return out, newest
+
+
+def _norm_county(s):
+    """臺→台、去掉縣市後綴，讓營地資料庫的「苗栗」對得上氣象署的「苗栗縣」。"""
+    if not s:
+        return ""
+    s = str(s).strip().replace("臺", "台")
+    if s.endswith("縣") or s.endswith("市"):
+        s = s[:-1]
+    return s
+
+
+def _norm_town(s):
+    if not s:
+        return ""
+    s = str(s).strip().replace("臺", "台")
+    for suf in ("鄉", "鎮", "市", "區"):
+        if s.endswith(suf):
+            return s[:-1]
+    return s
+
+
+def fetch_warnings(key):
+    """各縣市目前生效中的警特報。抓不到就回空的，不讓整批失敗。"""
+    try:
+        js = _get(CWA_BASE + WARN_DATASET, {"Authorization": key, "format": "JSON"}, 120).json()
+    except Exception as e:                      # noqa: BLE001
+        print("天氣特報抓取失敗，這次略過：%s" % e)
+        return {}
+    rec = js.get("records", js)
+    locs = rec.get("location") or rec.get("Location") or []
+    out = {}
+    for L in locs:
+        county = _norm_county(L.get("locationName") or L.get("LocationName"))
+        hz = L.get("hazardConditions") or L.get("HazardConditions") or {}
+        hazards = hz.get("hazards") or hz.get("Hazards") or []
+        if isinstance(hazards, dict):
+            hazards = hazards.get("hazard") or hazards.get("Hazard") or []
+        items = []
+        for h in hazards or []:
+            info = h.get("info") or h.get("Info") or {}
+            ph = info.get("phenomena") or info.get("Phenomena")
+            if not ph:
+                continue
+            vt = h.get("validTime") or h.get("ValidTime") or {}
+            aa = info.get("affectedAreas") or info.get("AffectedAreas") or {}
+            areas = []
+            for a in (aa.get("location") or aa.get("Location") or []):
+                n = a.get("locationName") or a.get("LocationName")
+                if n:
+                    areas.append(_norm_town(n))
+            items.append({
+                "p": ph,
+                "s": info.get("significance") or info.get("Significance"),
+                "st": vt.get("startTime") or vt.get("StartTime"),
+                "et": vt.get("endTime") or vt.get("EndTime"),
+                "areas": areas,
+            })
+        if items:
+            out[county] = items
+    if out:
+        print("天氣特報：%s" % json.dumps(
+            {k: [i["p"] for i in v] for k, v in out.items()}, ensure_ascii=False))
+    else:
+        print("天氣特報：目前沒有生效中的特報（%d 個縣市回傳）" % len(locs))
+        if locs:
+            print("第一筆結構供核對：%s"
+                  % json.dumps(locs[0], ensure_ascii=False)[:900])
+    return out
+
+
+# 只有這幾種對露營有意義，其他（濃霧、颱風等）不進風險模型
+WARN_KEEP = ("雨", "強風", "低溫", "高溫")
+
+
+def camp_warnings(c, warns):
+    items = warns.get(_norm_county(c.get("ct")))
+    if not items:
+        return None
+    town = _norm_town(c.get("d"))
+    out = []
+    for it in items:
+        if not any(k in it["p"] for k in WARN_KEEP):
+            continue
+        if it["areas"] and town and town not in it["areas"]:
+            continue
+        out.append({"p": it["p"], "s": it["s"], "et": it["et"]})
+    return out or None
 
 
 INTENSITY_MAP = {
@@ -506,10 +597,11 @@ def build_days(loc):
     return out
 
 
-def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None):
+def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None, warns=None):
     pts = [l for l in locs if l["lat"] and l["lon"]]
     rain = rain or []
     quakes = quakes or []
+    warns = warns or {}
     now = datetime.now(TPE)
     out_camps = []
     for c in camps:
@@ -553,6 +645,10 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
             eq = camp_quake(c, quakes, now)
             if eq:
                 out_camps[-1]["eq"] = eq
+        if warns:
+            w = camp_warnings(c, warns)
+            if w:
+                out_camps[-1]["warn"] = w
     check(out_camps)
     return {
         "generated": generated,
@@ -561,6 +657,7 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
         "rainObsTime": rain_time,
         "eqDays": EQ_DAYS,
         "eqCount": len(quakes),
+        "warnCount": sum(1 for c in out_camps if c.get("warn")),
         "count": len(out_camps),
         "camps": out_camps,
     }
@@ -649,9 +746,10 @@ def main():
         camps = load_camps()
         rain, rain_time = fetch_rain(key)
         quakes = fetch_quakes(key)
+        warns = fetch_warnings(key)
         payload = compose(camps, locs, elev,
                           datetime.now(TPE).isoformat(timespec="minutes"),
-                          rain, rain_time, quakes)
+                          rain, rain_time, quakes, warns)
 
     out = os.path.abspath(args.out)
     with open(out, "w", encoding="utf-8") as f:
