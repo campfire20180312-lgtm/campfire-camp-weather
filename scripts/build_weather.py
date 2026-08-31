@@ -39,6 +39,7 @@ CWA_BASE = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/"
 # 各縣市「未來1週天氣預報」是鄉鎮層級；全臺彙整版 F-D0047-091 只有縣市層級，不能用
 DATASETS = ["F-D0047-%03d" % n for n in range(3, 88, 4)]
 DEM_URL = "https://api.opentopodata.org/v1/srtm30m"
+RAIN_DATASET = "O-A0002-001"   # 雨量觀測站-雨量資料（觀測，不是預報）
 
 # 環境氣溫遞減率（°C / 100m）。營火部落資料庫既有說明用 0.6，這裡保持一致。
 # 乾空氣約 1.0、飽和空氣約 0.5，台灣山區多濕，0.55~0.65 都算合理。
@@ -149,6 +150,56 @@ def fetch_cwa(key, dataset, elements=NEEDED_ELEMENTS):
     if str(js.get("success")).lower() not in ("true", "1"):
         raise RuntimeError("氣象署回傳 success != true：%s" % str(js)[:200])
     return js
+
+
+def fetch_rain(key):
+    """抓全台雨量站的累積雨量。抓不到就回空的，不讓整批失敗。"""
+    params = {
+        "Authorization": key, "format": "JSON",
+        "RainfallElement": ["Past1hr", "Past3hr", "Past24hr", "Past3days"],
+        "GeoInfo": ["Coordinates", "StationAltitude", "CountyName", "TownName"],
+    }
+    try:
+        r = requests.get(CWA_BASE + RAIN_DATASET, params=params, timeout=120)
+        r.raise_for_status()
+        js = r.json()
+    except Exception as e:                      # noqa: BLE001
+        print("雨量站抓取失敗，這次略過：%s" % e)
+        return [], None
+
+    rec = js.get("records", js)
+    raw = rec.get("Station") or rec.get("station") or []
+    out, newest = [], None
+    for st in raw:
+        geo = st.get("GeoInfo") or {}
+        lat = lon = None
+        for c in geo.get("Coordinates") or []:
+            if "WGS84" in str(c.get("CoordinateName", "")):
+                lat = _f(c.get("StationLatitude"))
+                lon = _f(c.get("StationLongitude"))
+        if lat is None or lon is None:
+            continue
+        el = st.get("RainfallElement") or {}
+
+        def mm(name):
+            v = (el.get(name) or {}).get("Precipitation")
+            f = _num(v)
+            return None if f is None or f < 0 else round(f, 1)
+
+        t = st.get("ObsTime", {}).get("DateTime") if isinstance(st.get("ObsTime"), dict) else None
+        if t and (newest is None or t > newest):
+            newest = t
+        out.append({
+            "name": st.get("StationName") or st.get("stationName"),
+            "lat": lat, "lon": lon,
+            "alt": _num((geo.get("StationAltitude") or {}).get("StationAltitude")
+                        if isinstance(geo.get("StationAltitude"), dict)
+                        else geo.get("StationAltitude")),
+            "r1": mm("Past1hr"), "r3": mm("Past3hr"),
+            "r24": mm("Past24hr"), "r72": mm("Past3days"),
+        })
+    print("雨量站 %d 站，觀測時間 %s" % (len(out), newest))
+    return out, newest
 
 
 def all_locations(key):
@@ -312,8 +363,9 @@ def build_days(loc):
     return out
 
 
-def compose(camps, locs, elev, generated):
+def compose(camps, locs, elev, generated, rain=None, rain_time=None):
     pts = [l for l in locs if l["lat"] and l["lon"]]
+    rain = rain or []
     out_camps = []
     for c in camps:
         near = min(pts, key=lambda l: haversine(c["la"], c["lo"], l["lat"], l["lon"]))
@@ -344,11 +396,20 @@ def compose(camps, locs, elev, generated):
             "km": round(haversine(c["la"], c["lo"], near["lat"], near["lon"]), 1),
             "days": days,
         })
+        if rain:
+            st = min(rain, key=lambda s: haversine(c["la"], c["lo"], s["lat"], s["lon"]))
+            out_camps[-1]["rain"] = {
+                "st": st["name"],
+                "km": round(haversine(c["la"], c["lo"], st["lat"], st["lon"]), 1),
+                "alt": None if st["alt"] is None else int(st["alt"]),
+                "r1": st["r1"], "r3": st["r3"], "r24": st["r24"], "r72": st["r72"],
+            }
     check(out_camps)
     return {
         "generated": generated,
         "source": "中央氣象署開放資料 鄉鎮天氣預報（各縣市未來1週，F-D0047 系列）",
         "lapse": LAPSE,
+        "rainObsTime": rain_time,
         "count": len(out_camps),
         "camps": out_camps,
     }
@@ -412,8 +473,10 @@ def main():
         locs = all_locations(key)
         elev = town_elevations(locs, refresh=args.refresh_elev)
         camps = load_camps()
+        rain, rain_time = fetch_rain(key)
         payload = compose(camps, locs, elev,
-                          datetime.now(TPE).isoformat(timespec="minutes"))
+                          datetime.now(TPE).isoformat(timespec="minutes"),
+                          rain, rain_time)
 
     out = os.path.abspath(args.out)
     with open(out, "w", encoding="utf-8") as f:
