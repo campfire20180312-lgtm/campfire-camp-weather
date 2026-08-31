@@ -2,8 +2,8 @@ name: 產生營地天氣資料
 
 on:
   schedule:
-    - cron: '40 21 * * *'
-    - cron: '40 9 * * *'
+    # 每 3 小時跑一次，雨量觀測才不會太舊（GitHub 用 UTC）
+    - cron: '40 */3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -26,7 +26,6 @@ jobs:
           CWA_API_KEY_RAW: ${{ secrets.CWA_API_KEY }}
         run: |
           export CWA_API_KEY="$(printf '%s' "$CWA_API_KEY_RAW" | tr -d '[:space:]')"
-          echo "金鑰長度（去空白後）: ${#CWA_API_KEY}"
           python3 scripts/build_weather.py --out docs/weather.json
 
       - name: 提交更新
