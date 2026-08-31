@@ -513,6 +513,7 @@ def locations_of(js):
         locs_wrap = [locs_wrap]
     out = []
     for wrap in locs_wrap:
+        ct = _norm_county(wrap.get("LocationsName") or wrap.get("locationsName") or "")
         for loc in wrap.get("Location") or wrap.get("location") or []:
             name = loc.get("LocationName") or loc.get("locationName")
             lat = _f(loc.get("Latitude") or loc.get("lat"))
@@ -521,7 +522,7 @@ def locations_of(js):
             for el in loc.get("WeatherElement") or loc.get("weatherElement") or []:
                 en = el.get("ElementName") or el.get("elementName")
                 els[en] = el.get("Time") or el.get("time") or []
-            out.append({"name": name, "lat": lat, "lon": lon, "el": els})
+            out.append({"name": name, "lat": lat, "lon": lon, "ct": ct, "el": els})
     if not out:
         raise RuntimeError("解析不到 Location，請用 --inspect 看實際結構")
     return out
@@ -755,6 +756,68 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
     }
 
 
+def compose_towns(locs, elev, generated, rain=None, rain_time=None,
+                  quakes=None, warns=None):
+    """全台鄉鎮預報點另存一份，給「搜尋的地方沒有營地」時當備援。
+
+    欄位刻意跟營地同一個形狀，頁面可以直接沿用同一套渲染；差別是 dh=0
+    （預報點就是它自己，不做海拔修正）、沒有 Open-Meteo 的毫米數，
+    並且多一個 town=1 讓頁面知道這不是營地。
+    """
+    rain = rain or []
+    quakes = quakes or []
+    warns = warns or {}
+    now = datetime.now(TPE)
+    out = []
+    for l in locs:
+        if not (l.get("lat") and l.get("lon")):
+            continue
+        base = elev.get(l["name"], 0)
+        days = []
+        for d in build_days(l):
+            wsn = d["wsn"] if d["wsn"] is not None else d["wsd"]
+            days.append({
+                "dt": d["date"],
+                "hi": _r(d["hi"]), "lo": _r(d["lo"]),
+                "chi": _r(d["hi"]), "clo": _r(d["lo"]),
+                "feel": _r(wind_chill(d["lo"], wsn)),
+                "popd": _i(d["popd"]), "popn": _i(d["popn"]),
+                "wsd": _r(d["wsd"], 1), "wsn": _r(wsn, 1),
+                "rh": _i(d["rh"]),
+                "wxd": d["wxd"], "wxn": d["wxn"],
+            })
+        rec = {"n": l["name"], "ct": l.get("ct") or "", "d": l["name"],
+               "e": base, "tw": l["name"], "te": base, "dh": 0, "km": 0,
+               "town": 1, "days": days}
+        if rain:
+            st = min(rain, key=lambda s: haversine(l["lat"], l["lon"], s["lat"], s["lon"]))
+            rec["rain"] = {
+                "st": st["name"],
+                "km": round(haversine(l["lat"], l["lon"], st["lat"], st["lon"]), 1),
+                "alt": None if st["alt"] is None else int(st["alt"]),
+                "r1": st["r1"], "r3": st["r3"], "r24": st["r24"], "r72": st["r72"],
+            }
+        if quakes:
+            eq = camp_quake({"la": l["lat"], "lo": l["lon"]}, quakes, now)
+            if eq:
+                rec["eq"] = eq
+        if warns:
+            w = camp_warnings({"ct": rec["ct"], "d": l["name"]}, warns)
+            if w:
+                rec["warn"] = w
+        out.append(rec)
+    if len(out) < 300:
+        raise RuntimeError("鄉鎮預報點只有 %d 筆，預期 300 以上" % len(out))
+    return {
+        "generated": generated,
+        "source": "中央氣象署開放資料 鄉鎮天氣預報（各縣市未來1週，F-D0047 系列）",
+        "rainObsTime": rain_time,
+        "note": "鄉鎮預報點本身的預報值，沒有做海拔修正，也沒有國際模式的預估雨量。",
+        "count": len(out),
+        "towns": out,
+    }
+
+
 def check(camps):
     """寧可整批失敗，也不要安靜產出一包空值蓋掉好的資料。"""
     if len(camps) < 300:
@@ -793,6 +856,7 @@ def main():
     ap.add_argument("--refresh-elev", action="store_true", help="重新計算預報點海拔")
     args = ap.parse_args()
 
+    towns = None
     if args.demo:
         from demo_data import make_demo
         payload = make_demo(LAPSE, adjust, wind_chill)
@@ -840,15 +904,22 @@ def main():
         quakes = fetch_quakes(key)
         warns = fetch_warnings(key)
         qpf = fetch_qpf(camps)
-        payload = compose(camps, locs, elev,
-                          datetime.now(TPE).isoformat(timespec="minutes"),
+        stamp = datetime.now(TPE).isoformat(timespec="minutes")
+        payload = compose(camps, locs, elev, stamp,
                           rain, rain_time, quakes, warns, qpf)
+        towns = compose_towns(locs, elev, stamp, rain, rain_time, quakes, warns)
 
     out = os.path.abspath(args.out)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
     print("已寫入 %s（%d 筆營地，%.1f KB）" %
           (out, payload["count"], os.path.getsize(out) / 1024))
+    if towns:
+        tout = os.path.join(os.path.dirname(out), "towns.json")
+        with open(tout, "w", encoding="utf-8") as f:
+            json.dump(towns, f, ensure_ascii=False, separators=(",", ":"))
+        print("已寫入 %s（%d 個鄉鎮預報點，%.1f KB）" %
+              (tout, towns["count"], os.path.getsize(tout) / 1024))
 
 
 if __name__ == "__main__":
