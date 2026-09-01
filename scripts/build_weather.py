@@ -788,6 +788,8 @@ def compose_towns(locs, elev, generated, rain=None, rain_time=None,
             })
         rec = {"n": l["name"], "ct": l.get("ct") or "", "d": l["name"],
                "e": base, "tw": l["name"], "te": base, "dh": 0, "km": 0,
+               # 給外部深連結用：帶座標的連結可以自動找最近的預報點
+               "lat": round(l["lat"], 4), "lng": round(l["lon"], 4),
                "town": 1, "days": days}
         if rain:
             st = min(rain, key=lambda s: haversine(l["lat"], l["lon"], s["lat"], s["lon"]))
