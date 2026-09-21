@@ -94,7 +94,11 @@ def _get(url, params=None, timeout=120, tries=3):
 # ---------------------------------------------------------------- 營地清單
 
 def load_camps(url=DB_URL):
-    """從資料庫頁面內嵌的 base64 腳本裡取出 DATA 與 GEO。"""
+    """從資料庫頁面內嵌的 base64 腳本裡取出 DATA、GEO 與 PIN。
+
+    座標以 GEO 為主；GEO 沒有的營地改用 PIN（Google 地點座標），
+    兩者都沒有的才略過，並在紀錄裡列出名稱。
+    """
     html = _get(url, None, 60).text
     m = re.search(r'var\s+S\s*=\s*"([A-Za-z0-9+/=]+)"', html)
     if not m:
@@ -103,12 +107,21 @@ def load_camps(url=DB_URL):
 
     data = _js_literal(code, "DATA")
     geo = _js_literal(code, "GEO")
+    try:
+        pin = _js_literal(code, "PIN")
+    except RuntimeError:
+        pin = {}
 
-    camps = []
+    camps, from_pin, no_coord = [], 0, []
     for r in data:
         g = geo.get(r["name"])
         if not g:
-            continue
+            g = pin.get(r["name"])
+            if g and _in_taiwan(g):
+                from_pin += 1
+            else:
+                no_coord.append(r["name"])
+                continue
         camps.append({
             "n": r["name"],
             "ct": r.get("county", ""),
@@ -125,7 +138,18 @@ def load_camps(url=DB_URL):
         })
     if len(camps) < 100:
         raise RuntimeError("營地筆數異常（%d），資料庫頁面格式可能改了" % len(camps))
+    print("營地 %d 筆（其中 %d 筆座標取自 PIN）；沒有座標而略過 %d 筆：%s"
+          % (len(camps), from_pin, len(no_coord), "、".join(no_coord) or "無"))
     return camps
+
+
+def _in_taiwan(g):
+    """座標是否落在台灣本島與離島的大致範圍內。"""
+    try:
+        la, lo = float(g[0]), float(g[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    return 21.5 <= la <= 26.5 and 118.0 <= lo <= 122.5
 
 
 def _js_literal(code, name):
