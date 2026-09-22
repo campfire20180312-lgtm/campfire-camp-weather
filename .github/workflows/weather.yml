@@ -21,6 +21,23 @@ jobs:
 
       - run: pip install requests
 
+      # 保護網（2026-09-22）：取回上一次成功的營地清單。快取是加密的，只存在 Actions 快取，不進儲存庫。
+      - name: 取回營地快取
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/camps.enc
+          key: camps-${{ github.run_id }}
+          restore-keys: camps-
+
+      - name: 解密營地快取
+        env:
+          K: ${{ secrets.CWA_API_KEY }}
+        run: |
+          mkdir -p .cache
+          if [ -f .cache/camps.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:K -in .cache/camps.enc -out .cache/camps.json || rm -f .cache/camps.json
+          fi
+
       - name: 抓氣象署預報並產生 weather.json
         env:
           CWA_API_KEY_RAW: ${{ secrets.CWA_API_KEY }}
@@ -35,3 +52,28 @@ jobs:
           git add docs/weather.json docs/towns.json scripts/town_elev.json
           git diff --staged --quiet || git commit -m "weather: $(date -u +%Y-%m-%dT%H:%MZ)"
           git push
+
+      - name: 加密新的營地快取
+        id: enc
+        env:
+          K: ${{ secrets.CWA_API_KEY }}
+        run: |
+          if [ -f .cache/FRESH ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:K -in .cache/camps.json -out .cache/camps.enc
+            echo "fresh=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 存營地快取
+        if: steps.enc.outputs.fresh == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/camps.enc
+          key: camps-${{ github.run_id }}
+
+      # 天氣照常更新了，但營地清單用的是舊快取：故意讓這次執行失敗，GitHub 會寄信通知。
+      - name: 檢查是否用了舊營地清單
+        run: |
+          if [ -f .cache/FALLBACK ]; then
+            echo "::error::資料庫頁抓不到，這次用 $(head -1 .cache/FALLBACK) 的營地快取算天氣。原因：$(sed -n 2p .cache/FALLBACK)"
+            exit 1
+          fi
