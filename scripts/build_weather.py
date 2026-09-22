@@ -148,6 +148,34 @@ def load_camps(url=DB_URL):
     return camps
 
 
+# 保護網（2026-09-22）：資料庫頁抓不到時，沿用上一次成功的營地清單繼續算天氣。
+# 快取檔只放在 GitHub Actions 的快取裡（而且 workflow 會用密鑰加密），不會提交進公開的儲存庫。
+# 用了快取就留下 .cache/FALLBACK，workflow 最後一步看到它會故意失敗，讓 GitHub 寄信通知。
+CACHE_DIR = os.path.join(HERE, "..", ".cache")
+CACHE_FILE = os.path.join(CACHE_DIR, "camps.json")
+
+
+def load_camps_safe():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        camps = load_camps()
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"time": datetime.now(TPE).isoformat(timespec="minutes"), "camps": camps},
+                      f, ensure_ascii=False)
+        open(os.path.join(CACHE_DIR, "FRESH"), "w").close()
+        return camps, None
+    except Exception as e:                      # noqa: BLE001
+        print("::warning::資料庫頁抓取或解析失敗：%s" % str(e)[:300])
+        if not os.path.exists(CACHE_FILE):
+            raise
+        with open(CACHE_FILE, encoding="utf-8") as f:
+            cache = json.load(f)
+        with open(os.path.join(CACHE_DIR, "FALLBACK"), "w", encoding="utf-8") as f:
+            f.write("%s\n%s\n" % (cache.get("time", ""), str(e)[:300]))
+        print("改用 %s 的營地快取（%d 筆）繼續產生天氣" % (cache.get("time"), len(cache["camps"])))
+        return cache["camps"], "cache:" + cache.get("time", "")
+
+
 def _in_taiwan(g):
     """座標是否落在台灣本島與離島的大致範圍內。"""
     try:
@@ -932,7 +960,7 @@ def main():
             return
         locs = all_locations(key)
         elev = town_elevations(locs, refresh=args.refresh_elev)
-        camps = load_camps()
+        camps, camp_src = load_camps_safe()
         rain, rain_time = fetch_rain(key)
         quakes = fetch_quakes(key)
         warns = fetch_warnings(key)
@@ -941,6 +969,8 @@ def main():
         payload = compose(camps, locs, elev, stamp,
                           rain, rain_time, quakes, warns, qpf)
         towns = compose_towns(locs, elev, stamp, rain, rain_time, quakes, warns)
+        if camp_src:
+            payload["campSource"] = camp_src
 
     out = os.path.abspath(args.out)
     with open(out, "w", encoding="utf-8") as f:
