@@ -115,10 +115,9 @@ def load_camps(url=DB_URL):
     camps, from_pin, no_coord = [], 0, []
     closed = 0
     for r in data:
-        # 停業的營地不算天氣（2026-09-22）；不符千元標準的（over）照算，但標 ov，頁面上另外標示
+        # 2026-09-22 達哥決定：不管價格、停業與否全部都算天氣。停業的標 cl，頁面上標「停業」。
         if r.get("closed"):
             closed += 1
-            continue
         g = geo.get(r["name"])
         if not g:
             g = pin.get(r["name"])
@@ -139,11 +138,12 @@ def load_camps(url=DB_URL):
             "moto": 1 if r.get("moto") else 0,
             "hd": 1 if r.get("hd") else 0,
             "ov": 1 if r.get("over") else 0,
+            "cl": 1 if r.get("closed") else 0,
             "pw": _power_flag(r.get("note", "")),
         })
     if len(camps) < 100:
         raise RuntimeError("營地筆數異常（%d），資料庫頁面格式可能改了" % len(camps))
-    print("營地 %d 筆（其中超過千元 %d 筆、%d 筆座標取自 PIN）；停業略過 %d 筆；沒有座標而略過 %d 筆：%s"
+    print("營地 %d 筆（其中超過千元 %d 筆、%d 筆座標取自 PIN）；其中停業 %d 筆；沒有座標而略過 %d 筆：%s"
           % (len(camps), sum(c["ov"] for c in camps), from_pin, closed, len(no_coord), "、".join(no_coord) or "無"))
     return camps
 
@@ -726,8 +726,8 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
             "km": round(haversine(c["la"], c["lo"], near["lat"], near["lon"]), 1),
             "days": days,
         })
-        if c.get("ov"):
-            out_camps[-1]["ov"] = 1
+        if c.get("cl"):
+            out_camps[-1]["cl"] = 1
         if q.get("e") is not None:
             out_camps[-1]["qe"] = q["e"]
         # 氣象署預報之後的日子，用國際模式補上去，標記 src=om，頁面上會標成參考值。
@@ -783,7 +783,6 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
         "cwaDays": max((sum(1 for d in c["days"] if d.get("src") != "om") for c in out_camps),
                        default=0),
         "count": len(out_camps),
-        "liveCount": sum(1 for c in out_camps if not c.get("ov")),
         "camps": out_camps,
     }
 
