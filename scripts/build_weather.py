@@ -127,6 +127,7 @@ def load_camps(url=DB_URL):
                 no_coord.append(r["name"])
                 continue
         camps.append({
+            "id": r.get("fid"),
             "n": r["name"],
             "ct": r.get("county", ""),
             "d": r.get("dist", ""),
@@ -370,7 +371,8 @@ def fetch_warnings(key):
     locs = rec.get("location") or rec.get("Location") or []
     out = {}
     for L in locs:
-        county = _norm_county(L.get("locationName") or L.get("LocationName"))
+        # 2026-10-09：保留「縣／市」，嘉義縣與嘉義市、新竹縣與新竹市才不會互相蓋掉
+        county = str(L.get("locationName") or L.get("LocationName") or "").strip().replace("臺", "台")
         hz = L.get("hazardConditions") or L.get("HazardConditions") or {}
         hazards = hz.get("hazards") or hz.get("Hazards") or []
         if isinstance(hazards, dict):
@@ -412,8 +414,25 @@ def fetch_warnings(key):
 WARN_KEEP = ("雨", "強風", "低溫", "高溫")
 
 
+# 新竹、嘉義的縣與市要靠鄉鎮分（資料庫的縣市欄只寫「新竹」「嘉義」）
+CITY_DIST = {"新竹": {"東區", "北區", "香山區", "東", "北", "香山"},
+             "嘉義": {"東區", "西區", "東", "西"}}
+
+
+def _warn_keys(c):
+    ct = _norm_county(c.get("ct"))
+    d = str(c.get("d") or "").strip().replace("臺", "台")
+    if ct in CITY_DIST:
+        return [ct + ("市" if d in CITY_DIST[ct] else "縣")]
+    return [ct + "市", ct + "縣", ct]
+
+
 def camp_warnings(c, warns):
-    items = warns.get(_norm_county(c.get("ct")))
+    items = None
+    for k in _warn_keys(c):
+        if k in warns:
+            items = warns[k]
+            break
     if not items:
         return None
     town = _norm_town(c.get("d"))
@@ -616,6 +635,19 @@ def _num(v):
     return None if f <= -90 else f
 
 
+def _num_gte(v):
+    """風速偶爾寫成「≥ 11」「>= 11」（2026-10-09）：回傳 (數字, 是不是下限)。之前直接 float() 失敗變成空值。"""
+    if v is None:
+        return None, False
+    m = re.match(r"^\s*(?:≥|≧|>=|＞＝|>)\s*(-?\d+(?:\.\d+)?)", str(v))
+    if m:
+        return float(m.group(1)), True
+    m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*(?:以上|\+)\s*$", str(v))
+    if m:
+        return float(m.group(1)), True
+    return _num(v), False
+
+
 def _start(t):
     s = t.get("StartTime") or t.get("startTime") or t.get("DataTime")
     return datetime.fromisoformat(s) if s else None
@@ -624,10 +656,31 @@ def _start(t):
 # ---------------------------------------------------------------- 預報點海拔
 
 def town_elevations(locs, refresh=False):
+    # 2026-10-09：快取原本只用鄉鎮名當鍵，台北與基隆的中正區、四個東區…共用同一個海拔。
+    # 同名的改用「縣市|鄉鎮」當鍵（l["ek"]），其他維持原樣，快取不用整份重抓。
+    cnt = {}
+    for l in locs:
+        cnt[l["name"]] = cnt.get(l["name"], 0) + 1
+    for l in locs:
+        l["ek"] = (l.get("ct", "") + "|" + l["name"]) if cnt[l["name"]] > 1 else l["name"]
     cache = {}
     if os.path.exists(ELEV_CACHE) and not refresh:
         cache = json.load(open(ELEV_CACHE, encoding="utf-8"))
-    missing = [l for l in locs if l["name"] not in cache and l["lat"] and l["lon"]]
+    missing = [l for l in locs if l["ek"] not in cache and l["lat"] and l["lon"]]
+    try:
+        _dem_fill(cache, missing)
+    except Exception as e:                      # noqa: BLE001
+        # DEM 抓不到時，同名鄉鎮先沿用舊的共用值（不寫進快取），下次再補，不讓整批失敗
+        print("預報點海拔（DEM）抓取失敗，先沿用舊值：%s" % str(e)[:200])
+    json.dump(cache, open(ELEV_CACHE, "w", encoding="utf-8"), ensure_ascii=False, indent=0)
+    out = dict(cache)
+    for l in locs:
+        if l["ek"] not in out and l["name"] in cache:
+            out[l["ek"]] = cache[l["name"]]
+    return out
+
+
+def _dem_fill(cache, missing):
     for i in range(0, len(missing), 90):
         batch = missing[i:i + 90]
         q = "|".join("%.5f,%.5f" % (l["lat"], l["lon"]) for l in batch)
@@ -636,11 +689,8 @@ def town_elevations(locs, refresh=False):
         res = r.json().get("results", [])
         for l, item in zip(batch, res):
             e = item.get("elevation")
-            cache[l["name"]] = round(e) if e is not None else 0
+            cache[l["ek"]] = round(e) if e is not None else 0
         time.sleep(1.2)
-    json.dump(cache, open(ELEV_CACHE, "w", encoding="utf-8"),
-              ensure_ascii=False, indent=0)
-    return cache
 
 
 # ---------------------------------------------------------------- 換算
@@ -679,19 +729,23 @@ def build_days(loc):
             return st.date().isoformat(), "day"
         return st.date().isoformat(), "night"
 
-    def put(el_name, prefer, field, numeric=True):
+    def put(el_name, prefer, field, numeric=True, gte=False):
         for t in loc["el"].get(el_name, []):
             key, part = slot(t)
             if not key:
                 continue
             v = _value(t, prefer)
-            v = _num(v) if numeric else v
+            if gte:
+                v, g = _num_gte(v)
+                days.setdefault(key, {})[part + "_" + field + "g"] = 1 if (g and v is not None) else None
+            else:
+                v = _num(v) if numeric else v
             days.setdefault(key, {})[part + "_" + field] = v
 
     put("最高溫度", ["溫度", "MaxTemperature"], "hi")
     put("最低溫度", ["溫度", "MinTemperature"], "lo")
     put("12小時降雨機率", ["降雨機率", "ProbabilityOfPrecipitation"], "pop")
-    put("風速", ["風速", "WindSpeed"], "ws")
+    put("風速", ["風速", "WindSpeed"], "ws", gte=True)
     put("平均相對濕度", ["相對濕度", "RelativeHumidity"], "rh")
     put("天氣現象", ["天氣現象", "Weather"], "wx", numeric=False)
 
@@ -706,6 +760,8 @@ def build_days(loc):
             "popn": d.get("night_pop"),
             "wsd": d.get("day_ws"),
             "wsn": d.get("night_ws"),
+            "wsdg": d.get("day_wsg"),
+            "wsng": d.get("night_wsg"),
             "rh": d.get("night_rh", d.get("day_rh")),
             "wxd": d.get("day_wx"),
             "wxn": d.get("night_wx"),
@@ -724,7 +780,7 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
     out_camps = []
     for c in camps:
         near = min(pts, key=lambda l: haversine(c["la"], c["lo"], l["lat"], l["lon"]))
-        base = elev.get(near["name"], 0)
+        base = elev.get(near.get("ek", near["name"]), 0)
         dh = (c["e"] or 0) - base
         q = qpf.get(c["n"]) or {}
         qdays = q.get("d") or {}
@@ -735,6 +791,7 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
             clo = adjust(lo, dh)
             chi = adjust(hi, dh)
             wsn = d["wsn"] if d["wsn"] is not None else d["wsd"]
+            wsng = d["wsng"] if d["wsn"] is not None else d["wsdg"]
             feel = wind_chill(clo, wsn)
             days.append({
                 "dt": d["date"],
@@ -746,16 +803,23 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
                 "wxd": d["wxd"], "wxn": d["wxn"],
                 "mm": (qdays.get(d["date"]) or {}).get("mm"),
             })
+            if d["wsdg"]:
+                days[-1]["wsdg"] = 1
+            if wsng:
+                days[-1]["wsng"] = 1
         # 只輸出頁面真的會用到的欄位。座標、價格、分類、機車友善這些留在資料庫頁，
         # 不要在公開的 weather.json 裡再複製一份，避免整包被輕鬆抓走。
         out_camps.append({
             "n": c["n"], "ct": c["ct"], "d": c["d"], "e": c["e"], "pw": c["pw"],
+            "id": c.get("id"),
             "tw": near["name"], "te": base, "dh": dh,
             "km": round(haversine(c["la"], c["lo"], near["lat"], near["lon"]), 1),
             "days": days,
         })
         if c.get("cl"):
             out_camps[-1]["cl"] = 1
+        if near.get("ct") and near["ct"] != _norm_county(c.get("ct")):
+            out_camps[-1]["tc"] = near["ct"]
         if q.get("e") is not None:
             out_camps[-1]["qe"] = q["e"]
         # 氣象署預報之後的日子，用國際模式補上去，標記 src=om，頁面上會標成參考值。
@@ -831,10 +895,11 @@ def compose_towns(locs, elev, generated, rain=None, rain_time=None,
     for l in locs:
         if not (l.get("lat") and l.get("lon")):
             continue
-        base = elev.get(l["name"], 0)
+        base = elev.get(l.get("ek", l["name"]), 0)
         days = []
         for d in build_days(l):
             wsn = d["wsn"] if d["wsn"] is not None else d["wsd"]
+            wsng = d["wsng"] if d["wsn"] is not None else d["wsdg"]
             days.append({
                 "dt": d["date"],
                 "hi": _r(d["hi"]), "lo": _r(d["lo"]),
@@ -845,6 +910,10 @@ def compose_towns(locs, elev, generated, rain=None, rain_time=None,
                 "rh": _i(d["rh"]),
                 "wxd": d["wxd"], "wxn": d["wxn"],
             })
+            if d["wsdg"]:
+                days[-1]["wsdg"] = 1
+            if wsng:
+                days[-1]["wsng"] = 1
         rec = {"n": l["name"], "ct": l.get("ct") or "", "d": l["name"],
                "e": base, "tw": l["name"], "te": base, "dh": 0, "km": 0,
                # 給外部深連結用：帶座標的連結可以自動找最近的預報點
