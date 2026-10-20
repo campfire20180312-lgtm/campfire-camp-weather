@@ -410,8 +410,9 @@ def fetch_warnings(key):
     return out
 
 
-# 只有這幾種對露營有意義，其他（濃霧、颱風等）不進風險模型
-WARN_KEEP = ("雨", "強風", "低溫", "高溫")
+# 只有這幾種對露營有意義，其他（濃霧等）不進風險模型
+# 2026-10-20：加入颱風（陸上颱風警報），原本被濾掉，颱風來時頁面完全看不到警報
+WARN_KEEP = ("雨", "強風", "低溫", "高溫", "颱風")
 
 
 # 新竹、嘉義的縣與市要靠鄉鎮分（資料庫的縣市欄只寫「新竹」「嘉義」）
@@ -725,9 +726,15 @@ def build_days(loc):
         st = _start(t)
         if not st:
             return None, None
-        if 5 <= st.hour < 12:
+        # 2026-10-20：中午以後發布的第一段是 12:00–18:00（白天的後半），原本 5–12 點才算白天，
+        # 這段被當成晚上、又被 18:00 那段蓋掉，今天白天的降雨機率與天氣描述整個不見。
+        # 改成 05–18 點開始的都算白天；00–05 點開始的是前一晚的尾巴，不算進任何一天。
+        h = st.hour
+        if 5 <= h < 18:
             return st.date().isoformat(), "day"
-        return st.date().isoformat(), "night"
+        if h >= 18:
+            return st.date().isoformat(), "night"
+        return None, None
 
     def put(el_name, prefer, field, numeric=True, gte=False):
         for t in loc["el"].get(el_name, []):
