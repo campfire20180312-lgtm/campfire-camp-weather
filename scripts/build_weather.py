@@ -295,6 +295,22 @@ GUST_MODELS = ["ecmwf_ifs", "icon_seamless", "gfs_seamless", "ukmo_seamless",
 GUST_BATCH = 40
 
 
+def _ens_vals(d, prefix, j):
+    vals = []
+    for m in GUST_MODELS:
+        col = d.get(prefix + m) or []
+        v = col[j] if j < len(col) else None
+        if v is not None:
+            vals.append(float(v))
+    return vals
+
+
+def _median(vals):
+    vals = sorted(vals)
+    n = len(vals)
+    return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+
+
 def fetch_gust_ens(camps):
     """多模式最大陣風（m/s）的中位數。營地先併成 0.1 度格點（約 11 公里，比模式格子還小）以減少請求。
     抓不到就回空的，沿用原本單一模式的陣風。"""
@@ -308,7 +324,7 @@ def fetch_gust_ens(camps):
         params = {
             "latitude": ",".join("%.1f" % k[0] for k in chunk),
             "longitude": ",".join("%.1f" % k[1] for k in chunk),
-            "daily": "wind_gusts_10m_max",
+            "daily": "wind_gusts_10m_max,wind_speed_10m_max",   # 2026-10-21：平均風也取中間值
             "models": ",".join(GUST_MODELS),
             "wind_speed_unit": "ms",
             "timezone": "Asia/Taipei",
@@ -327,17 +343,13 @@ def fetch_gust_ens(camps):
             d = r.get("daily") or {}
             rec = {}
             for j, day in enumerate(d.get("time") or []):
-                vals = []
-                for m in GUST_MODELS:
-                    col = d.get("wind_gusts_10m_max_" + m) or []
-                    v = col[j] if j < len(col) else None
-                    if v is not None:
-                        vals.append(float(v))
+                vals = _ens_vals(d, "wind_gusts_10m_max_", j)
                 if vals:
-                    vals.sort()
-                    n = len(vals)
-                    med = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
-                    rec[day] = {"gu": round(med, 1), "gn": n}
+                    rec[day] = {"gu": round(_median(vals), 1), "gn": len(vals)}
+                    # 2026-10-21 達哥：一般風力也要標，平均風同樣取 6 個模式的中間值（m/s）
+                    wv = _ens_vals(d, "wind_speed_10m_max_", j)
+                    if wv:
+                        rec[day]["wm"] = round(_median(wv), 1)
             got[k] = rec
         time.sleep(1.0)
     out = {}
@@ -875,6 +887,8 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
                 # 2026-10-21：氣象署沒有陣風，每天的最大陣風用國際模式的
                 "gu": (qdays.get(d["date"]) or {}).get("gu"),
                 "gn": (qdays.get(d["date"]) or {}).get("gn"),   # 幾個模式取中間值
+                # 2026-10-21：國際模式平均風（多模式中間值，m/s），跟氣象署平均風並列
+                "wm": (qdays.get(d["date"]) or {}).get("wm"),
             })
             if d["wsdg"]:
                 days[-1]["wsdg"] = 1
@@ -919,6 +933,7 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
                     "mm": v.get("mm"),
                     "gu": v.get("gu"),
                     "gn": v.get("gn"),
+                    "wm": v.get("wm"),
                 })
         if rain:
             st = min(rain, key=lambda s: haversine(c["la"], c["lo"], s["lat"], s["lon"]))
@@ -1123,6 +1138,8 @@ def main():
                 if dt in (q.get("d") or {}):
                     q["d"][dt]["gu"] = v["gu"]
                     q["d"][dt]["gn"] = v["gn"]
+                    if v.get("wm") is not None:
+                        q["d"][dt]["wm"] = v["wm"]
         stamp = datetime.now(TPE).isoformat(timespec="minutes")
         payload = compose(camps, locs, elev, stamp,
                           rain, rain_time, quakes, warns, qpf)
