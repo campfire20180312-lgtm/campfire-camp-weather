@@ -298,7 +298,8 @@ def fetch_qpf(camps):
             "latitude": ",".join("%.4f" % c["la"] for c in chunk),
             "longitude": ",".join("%.4f" % c["lo"] for c in chunk),
             "daily": ("precipitation_sum,precipitation_probability_max,"
-                      "temperature_2m_max,temperature_2m_min,wind_speed_10m_max"),
+                      "temperature_2m_max,temperature_2m_min,wind_speed_10m_max,"
+                      "wind_gusts_10m_max"),   # 2026-10-21：達哥要風力以陣風為主
             "timezone": "Asia/Taipei",
             "forecast_days": QPF_DAYS,
         }
@@ -324,6 +325,7 @@ def fetch_qpf(camps):
             mm, pop = col("precipitation_sum"), col("precipitation_probability_max")
             tmx, tmn = col("temperature_2m_max"), col("temperature_2m_min")
             ws = col("wind_speed_10m_max")
+            gu = col("wind_gusts_10m_max")
             rec = {}
             for k, day in enumerate(days):
                 rec[day] = {
@@ -333,6 +335,8 @@ def fetch_qpf(camps):
                     "lo": _r(tmn[k], 1),
                     # Open-Meteo 的風速預設是 km/h，換成 m/s 才跟氣象署一致
                     "ws": None if ws[k] is None else round(float(ws[k]) / 3.6, 1),
+                    # 最大陣風，一樣從 km/h 換成 m/s
+                    "gu": None if gu[k] is None else round(float(gu[k]) / 3.6, 1),
                 }
             out[c["n"]] = {"e": _i(r.get("elevation")), "d": rec}
         time.sleep(0.6)
@@ -809,6 +813,8 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
                 "rh": _i(d["rh"]),
                 "wxd": d["wxd"], "wxn": d["wxn"],
                 "mm": (qdays.get(d["date"]) or {}).get("mm"),
+                # 2026-10-21：氣象署沒有陣風，每天的最大陣風用國際模式的
+                "gu": (qdays.get(d["date"]) or {}).get("gu"),
             })
             if d["wsdg"]:
                 days[-1]["wsdg"] = 1
@@ -851,6 +857,7 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
                     "wsd": ws, "wsn": ws,
                     "rh": None, "wxd": None, "wxn": None,
                     "mm": v.get("mm"),
+                    "gu": v.get("gu"),
                 })
         if rain:
             st = min(rain, key=lambda s: haversine(c["la"], c["lo"], s["lat"], s["lon"]))
