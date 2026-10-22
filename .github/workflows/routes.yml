@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - run: pip install requests numpy pillow
+      - run: pip install requests numpy pillow osmium
 
       # 營地清單：跟天氣資料用同一份加密快取當保護網
       - name: 取回營地快取
@@ -73,7 +73,7 @@ jobs:
         run: |
           git config user.name  "campfire-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add docs/routes scripts/route_elev.json
+          git add docs/routes
           git diff --staged --quiet && exit 0
           git commit -m "routes: $(date -u +%Y-%m-%dT%H:%MZ)"
           for i in 1 2 3 4 5; do
