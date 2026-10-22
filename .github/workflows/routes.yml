@@ -26,7 +26,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - run: pip install requests numpy pillow osmium
+      - run: pip install requests numpy pillow osmium shapely
+
+      - name: 裝 osmium-tool（挑出鄉鎮界線）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
 
       # 營地清單：跟天氣資料用同一份加密快取當保護網
       - name: 取回營地快取
