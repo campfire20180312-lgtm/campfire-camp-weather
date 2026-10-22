@@ -1,0 +1,80 @@
+name: 算露營路線
+
+# 2026-10-22 達哥選「做法二：先算好真實路線」：每週用 OpenStreetMap＋OSRM 算出縣市出發地到每個營地的開車路線，
+# 記下沿路經過的鄉鎮與路段海拔，天氣頁的路線卡用鄉鎮預報換算沿路溫度。
+on:
+  schedule:
+    # 每週一 03:20（台灣時間）＝週日 19:20 UTC
+    - cron: '20 19 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: routes
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install requests numpy
+
+      # 營地清單：跟天氣資料用同一份加密快取當保護網
+      - name: 取回營地快取
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/camps.enc
+          key: camps-${{ github.run_id }}
+          restore-keys: camps-
+
+      - name: 解密營地快取
+        env:
+          K: ${{ secrets.CWA_API_KEY }}
+        run: |
+          mkdir -p .cache
+          if [ -f .cache/camps.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:K -in .cache/camps.enc -out .cache/camps.json || rm -f .cache/camps.json
+          fi
+
+      - name: 下載台灣 OpenStreetMap
+        run: |
+          mkdir -p osrm
+          curl -sSL --retry 3 -o osrm/taiwan.osm.pbf https://download.geofabrik.de/asia/taiwan-latest.osm.pbf
+          ls -la osrm
+
+      - name: 建 OSRM 路網並啟動
+        run: |
+          IMG=ghcr.io/project-osrm/osrm-backend:v5.27.1
+          docker pull "$IMG" || { IMG=osrm/osrm-backend:latest; docker pull "$IMG"; }
+          docker run --rm -v "$PWD/osrm:/data" "$IMG" osrm-extract -p /opt/car.lua /data/taiwan.osm.pbf
+          docker run --rm -v "$PWD/osrm:/data" "$IMG" osrm-partition /data/taiwan.osrm
+          docker run --rm -v "$PWD/osrm:/data" "$IMG" osrm-customize /data/taiwan.osrm
+          docker run -d --name osrm -p 5000:5000 -v "$PWD/osrm:/data" "$IMG" osrm-routed --algorithm mld --max-table-size 10000 /data/taiwan.osrm
+          for i in $(seq 1 60); do
+            if curl -s "http://127.0.0.1:5000/route/v1/driving/121.517,25.0478;121.758,24.7546?overview=false" | grep -q '"Ok"'; then echo "OSRM 就緒"; break; fi
+            sleep 2
+          done
+
+      - name: 算路線
+        run: python3 scripts/build_routes.py
+
+      - name: 提交更新
+        run: |
+          git config user.name  "campfire-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs/routes scripts/route_elev.json
+          git diff --staged --quiet && exit 0
+          git commit -m "routes: $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3 4 5; do
+            git pull --rebase && git push && break
+            sleep 10
+          done
