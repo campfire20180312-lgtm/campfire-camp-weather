@@ -16,6 +16,8 @@
 台灣 OSM 檔（找隧道，--pbf，預設 osrm/taiwan.osm.pbf；需要 pip install osmium）。
 隧道：地形圖是山的表面，雪山隧道、蘇花改隧道上方是山頂，第一次算出坪林 794 公尺、秀林 1152 公尺。
 隧道裡的點改用兩端洞口高度內插。
+鄉鎮：用 OSM 的鄉鎮市區界線判斷每個點在哪個鄉鎮（第一次用「最近的預報點」，台11 東河到臺東市的海邊被算成鹿野鄉）。
+需要 osmium-tool（先把行政界線挑出來，比較快）與 pip install shapely。
 2026-10-22 第一次跑：路線 2 分多鐘就算完，卡在 Open-Meteo 海拔查詢 20 分鐘以上（疑似 GitHub 主機被限流），改用地形圖磚自己讀。
 用法：python3 scripts/build_routes.py [--osrm URL] [--only 台北] [--limit N]
 """
@@ -154,6 +156,89 @@ def load_tunnels(pbf):
     h.apply_file(pbf)
     print("隧道路段 %d 條、%d 段" % (h.ways, len(h.pairs)), flush=True)
     return h.pairs
+
+
+def _norm(n):
+    return (n or "").replace("台", "臺").strip()
+
+
+def load_admin(pbf, tix, workdir=None):
+    """OSM 行政界線（admin_level 5–8）配對到氣象署鄉鎮預報點，回傳 [(shapely 多邊形, 預報點序號)]。"""
+    if not pbf or not os.path.exists(pbf):
+        print("找不到 OSM 檔，鄉鎮改用最近預報點", flush=True)
+        return []
+    import shutil
+    import subprocess
+    import osmium
+    import shapely
+    import shapely.wkb
+    src = pbf
+    if shutil.which("osmium"):
+        src = os.path.join(workdir or os.path.dirname(pbf), "admin.osm.pbf")
+        subprocess.run(["osmium", "tags-filter", pbf, "r/boundary=administrative", "-o", src, "--overwrite"], check=True)
+    wkbf = osmium.geom.WKBFactory()
+
+    class H(osmium.SimpleHandler):
+        def __init__(self):
+            super().__init__()
+            self.polys = []
+
+        def area(self, a):
+            t = a.tags
+            if t.get("boundary") != "administrative" or t.get("admin_level") not in ("5", "6", "7", "8"):
+                return
+            name = _norm(t.get("name"))
+            if not name:
+                return
+            try:
+                g = shapely.wkb.loads(wkbf.create_multipolygon(a), hex=True)
+            except Exception:                   # noqa: BLE001
+                return
+            self.polys.append((name, int(t.get("admin_level")), g))
+
+    h = H()
+    h.apply_file(src, locations=True, idx="flex_mem")
+    by_name = {}
+    for i, k in enumerate(tix.keys):
+        by_name.setdefault(_norm(k.split("|", 1)[1]), []).append(i)
+    out, used = [], set()
+    for name, lv, g in sorted(h.polys, key=lambda x: -x[1]):    # 層級數字大的（較細）先配
+        cand = by_name.get(name) or []
+        hit = [i for i in cand if i not in used and g.covers(shapely.points(tix.pts[i][1], tix.pts[i][0]))]
+        if not hit and len(cand) == 1 and cand[0] not in used:
+            c = g.centroid
+            la, lo = tix.pts[cand[0]]
+            if hav(la, lo, c.y, c.x) < 30:
+                hit = cand
+        if hit:
+            out.append((g, hit[0]))
+            used.add(hit[0])
+    print("鄉鎮界線：OSM 多邊形 %d 個，配到預報點 %d／%d 個" % (len(h.polys), len(used), len(tix.keys)), flush=True)
+    miss = [tix.keys[i] for i in range(len(tix.keys)) if i not in used]
+    if miss:
+        print("  沒配到：" + "、".join(miss[:40]), flush=True)
+    return out
+
+
+def assign_towns(keys, tix, admin):
+    """每個格點在哪個鄉鎮：先看界線，界線外（海上、橋上、沒配到的鄉鎮）用最近預報點。"""
+    keys = list(keys)
+    out = {}
+    if admin:
+        import numpy as np
+        import shapely
+        geoms = [g for g, _ in admin]
+        tree = shapely.STRtree(geoms)
+        ll = np.array([[float(x) for x in k.split(",")] for k in keys])
+        pts = shapely.points(ll[:, 1], ll[:, 0])
+        pi, gi = tree.query(pts, predicate="intersects")
+        for p, g in zip(pi.tolist(), gi.tolist()):
+            if keys[p] not in out:
+                out[keys[p]] = admin[g][1]
+    rest = [k for k in keys if k not in out]
+    print("鄉鎮：界線判斷 %d 點，最近預報點 %d 點" % (len(out), len(rest)), flush=True)
+    out.update(tix.nearest_many(rest))
+    return out
 
 
 def tunnel_flags(coords, nodes, tun):
@@ -422,7 +507,8 @@ def main():
             need.add(x[0])
     fill_elev(need, cache)
 
-    town_of = tix.nearest_many(need)
+    admin = load_admin(a.pbf, tix)
+    town_of = assign_towns(need, tix, admin)
     os.makedirs(a.out, exist_ok=True)
     gen = datetime.now(TPE).isoformat(timespec="minutes")
     for on, (code, _, _) in origins.items():
