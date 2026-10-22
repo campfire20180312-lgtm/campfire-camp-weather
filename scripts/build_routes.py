@@ -12,7 +12,8 @@
  "r":[[總公里, 分鐘, [鄉鎮序號, 最低海拔, 最高海拔, 公里], …], …]}   ← 第幾個地點的路線，算不出來是 null
 只存鄉鎮代碼與高度，不存營地座標與路線幾何。
 
-需要：本機 OSRM 服務（預設 http://127.0.0.1:5000）、docs/towns.json、Open-Meteo 海拔 API。
+需要：本機 OSRM 服務（預設 http://127.0.0.1:5000）、docs/towns.json、AWS Terrain Tiles（海拔，Open-Meteo 當備援）。
+2026-10-22 第一次跑：路線 2 分多鐘就算完，卡在 Open-Meteo 海拔查詢 20 分鐘以上（疑似 GitHub 主機被限流），改用地形圖磚自己讀。
 用法：python3 scripts/build_routes.py [--osrm URL] [--only 台北] [--limit N]
 """
 import argparse
@@ -34,6 +35,8 @@ TPE = timezone(timedelta(hours=8))
 SAMPLE_KM = 1.0          # 沿路每 1 公里取一個點
 ELEV_ROUND = 0.004       # 海拔快取格點（約 400 公尺）
 ELEV_URL = "https://api.open-meteo.com/v1/elevation"
+TILE_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+TILE_Z = 12              # 約 30 公尺一格（台灣緯度）
 ELEV_CACHE = os.path.join(HERE, "route_elev.json")
 GROUP_DEG = 0.015        # 約 1.5 公里內的營地當成同一個地點，只算一條路（2026-10-22 達哥：同一區域的營區合併算比較快）
 
@@ -129,7 +132,7 @@ def ekey(la, lo):
 def fill_elev(keys, cache, fetch=None):
     """補齊缺的海拔。fetch(lats, lons) -> [公尺]；預設打 Open-Meteo，每次 100 點。"""
     miss = sorted(k for k in keys if k not in cache)
-    print("海拔：需要 %d 點，快取已有 %d，要查 %d" % (len(keys), len(keys) - len(miss), len(miss)))
+    print("海拔：需要 %d 點，快取已有 %d，要查 %d" % (len(keys), len(keys) - len(miss), len(miss)), flush=True)
 
     def om(lats, lons):
         for t in range(4):
@@ -145,6 +148,15 @@ def fill_elev(keys, cache, fetch=None):
                 time.sleep(5 * (t + 1))
         return None
 
+    if fetch is None:
+        got = tile_elev(miss)
+        for k, v in got.items():
+            cache[k] = v
+        miss = [k for k in miss if k not in cache]
+        print("海拔：地形圖磚補了 %d 點，剩 %d 點改問 Open-Meteo" % (len(got), len(miss)), flush=True)
+        if len(miss) > 3000:
+            print("海拔：剩下太多，先不問 Open-Meteo，這些路段只是少了高度", flush=True)
+            return cache
     fetch = fetch or om
     for i in range(0, len(miss), 100):
         chunk = miss[i:i + 100]
@@ -160,6 +172,56 @@ def fill_elev(keys, cache, fetch=None):
         if i and i % 5000 == 0:
             print("  …%d/%d" % (i, len(miss)), flush=True)
     return cache
+
+
+def tile_xy(la, lo, z=TILE_Z):
+    n = 2 ** z
+    x = (lo + 180.0) / 360.0 * n
+    y = (1.0 - math.asinh(math.tan(math.radians(la))) / math.pi) / 2.0 * n
+    return x, y
+
+
+def tile_elev(keys, z=TILE_Z, workers=8):
+    """AWS Terrain Tiles（terrarium 格式）：高度 = R*256 + G + B/256 - 32768。只下載用得到的圖磚。"""
+    import io
+    import numpy as np
+    from PIL import Image
+    need = {}
+    for k in keys:
+        la, lo = (float(v) for v in k.split(","))
+        x, y = tile_xy(la, lo, z)
+        need.setdefault((int(x), int(y)), []).append((k, x, y))
+    print("海拔：要讀 %d 張地形圖磚" % len(need), flush=True)
+    sess = requests.Session()
+
+    def one(t):
+        url = TILE_URL.format(z=z, x=t[0], y=t[1])
+        for i in range(3):
+            try:
+                r = sess.get(url, timeout=60)
+                if r.status_code == 200:
+                    a = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGB"), dtype=np.float64)
+                    return t, a[:, :, 0] * 256 + a[:, :, 1] + a[:, :, 2] / 256 - 32768
+            except Exception as e:              # noqa: BLE001
+                print("圖磚失敗 %s：%s" % (url, str(e)[:100]), flush=True)
+            time.sleep(2 * (i + 1))
+        return t, None
+
+    out, bad = {}, 0
+    with ThreadPoolExecutor(workers) as ex:
+        for n, (t, h) in enumerate(ex.map(one, list(need))):
+            if h is None:
+                bad += 1
+                continue
+            H, W = h.shape
+            for k, x, y in need[t]:
+                px = min(W - 1, max(0, int((x - t[0]) * W)))
+                py = min(H - 1, max(0, int((y - t[1]) * H)))
+                out[k] = max(0, int(round(h[py, px])))
+            if n and n % 200 == 0:
+                print("  圖磚 %d/%d" % (n, len(need)), flush=True)
+    print("海拔：圖磚讀不到 %d 張" % bad, flush=True)
+    return out
 
 
 def segments(samples, town_of, elev):
@@ -271,7 +333,7 @@ def main():
                 geo[(j[0], j[1])] = res
             if n and n % 2000 == 0:
                 print("  路線 %d/%d（%.0f 秒）" % (n, len(jobs), time.time() - t0), flush=True)
-    print("算出 %d 條，失敗 %d 條" % (len(geo), len(jobs) - len(geo)))
+    print("算出 %d 條，失敗 %d 條" % (len(geo), len(jobs) - len(geo)), flush=True)
 
     cache = {}
     if os.path.exists(ELEV_CACHE):
@@ -303,7 +365,7 @@ def main():
         for ti, j in used.items():
             tl[j] = tix.keys[ti]
         out = {"v": 1, "gen": gen, "o": on, "towns": tl, "g": camp_g, "r": r,
-               "note": "路線：OpenStreetMap 貢獻者＋OSRM；海拔：Open-Meteo（Copernicus DEM 90m）"}
+               "note": "路線：OpenStreetMap 貢獻者＋OSRM；海拔：AWS Terrain Tiles（Mapzen／SRTM 等公開資料）"}
         p = os.path.join(a.out, code + ".json")
         with open(p, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
