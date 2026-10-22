@@ -12,7 +12,10 @@
  "r":[[總公里, 分鐘, [鄉鎮序號, 最低海拔, 最高海拔, 公里], …], …]}   ← 第幾個地點的路線，算不出來是 null
 只存鄉鎮代碼與高度，不存營地座標與路線幾何。
 
-需要：本機 OSRM 服務（預設 http://127.0.0.1:5000）、docs/towns.json、AWS Terrain Tiles（海拔，Open-Meteo 當備援）。
+需要：本機 OSRM 服務（預設 http://127.0.0.1:5000）、docs/towns.json、AWS Terrain Tiles（海拔，Open-Meteo 當備援）、
+台灣 OSM 檔（找隧道，--pbf，預設 osrm/taiwan.osm.pbf；需要 pip install osmium）。
+隧道：地形圖是山的表面，雪山隧道、蘇花改隧道上方是山頂，第一次算出坪林 794 公尺、秀林 1152 公尺。
+隧道裡的點改用兩端洞口高度內插。
 2026-10-22 第一次跑：路線 2 分多鐘就算完，卡在 Open-Meteo 海拔查詢 20 分鐘以上（疑似 GitHub 主機被限流），改用地形圖磚自己讀。
 用法：python3 scripts/build_routes.py [--osrm URL] [--only 台北] [--limit N]
 """
@@ -33,7 +36,7 @@ sys.path.insert(0, HERE)
 
 TPE = timezone(timedelta(hours=8))
 SAMPLE_KM = 1.0          # 沿路每 1 公里取一個點
-ELEV_ROUND = 0.004       # 海拔快取格點（約 400 公尺）
+ELEV_ROUND = 0.001       # 取海拔的格點（約 100 公尺；原本 400 公尺，山路會偏到山坡上）
 ELEV_URL = "https://api.open-meteo.com/v1/elevation"
 TILE_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
 TILE_Z = 12              # 約 30 公尺一格（台灣緯度）
@@ -71,22 +74,23 @@ def hav(la1, lo1, la2, lo2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def sample_line(coords, step=SAMPLE_KM):
-    """GeoJSON 座標（經度, 緯度）每 step 公里取一點，回傳 [(緯度, 經度, 累積公里)]，含起點終點。"""
+def sample_line(coords, step=SAMPLE_KM, tflags=None):
+    """GeoJSON 座標（經度, 緯度）每 step 公里取一點，回傳 [(緯度, 經度, 累積公里, 在隧道裡)]，含起點終點。"""
     if not coords:
         return []
-    out = [(coords[0][1], coords[0][0], 0.0)]
+    tflags = tflags or [False] * (len(coords) - 1)
+    out = [(coords[0][1], coords[0][0], 0.0, False)]
     acc, nxt = 0.0, step
-    for (lo1, la1), (lo2, la2) in zip(coords, coords[1:]):
+    for i, ((lo1, la1), (lo2, la2)) in enumerate(zip(coords, coords[1:])):
         d = hav(la1, lo1, la2, lo2)
         while d > 0 and acc + d >= nxt:
             f = (nxt - acc) / d
-            out.append((la1 + (la2 - la1) * f, lo1 + (lo2 - lo1) * f, nxt))
+            out.append((la1 + (la2 - la1) * f, lo1 + (lo2 - lo1) * f, nxt, tflags[i]))
             nxt += step
         acc += d
     last = coords[-1]
     if acc - out[-1][2] > 0.05:
-        out.append((last[1], last[0], acc))
+        out.append((last[1], last[0], acc, False))
     return out
 
 
@@ -125,8 +129,46 @@ class TownIndex:
         return out
 
 
+def load_tunnels(pbf):
+    """OSM 裡 highway＋tunnel 的路段，存成相鄰節點對 (小, 大)。"""
+    if not pbf or not os.path.exists(pbf):
+        print("找不到 OSM 檔，不處理隧道", flush=True)
+        return set()
+    import osmium
+
+    class H(osmium.SimpleHandler):
+        def __init__(self):
+            super().__init__()
+            self.pairs, self.ways = set(), 0
+
+        def way(self, w):
+            t = w.tags
+            if "highway" not in t or t.get("tunnel", "no") in ("no", "culvert"):
+                return
+            ns = [n.ref for n in w.nodes]
+            self.ways += 1
+            for a, b in zip(ns, ns[1:]):
+                self.pairs.add((a, b) if a < b else (b, a))
+
+    h = H()
+    h.apply_file(pbf)
+    print("隧道路段 %d 條、%d 段" % (h.ways, len(h.pairs)), flush=True)
+    return h.pairs
+
+
+def tunnel_flags(coords, nodes, tun):
+    """每一小段（第 i 點到第 i+1 點）是不是在隧道裡。節點數對不上就當沒有隧道。"""
+    n = len(coords) - 1
+    if not tun or not nodes or len(nodes) != len(coords):
+        return [False] * max(n, 0)
+    out = []
+    for a, b in zip(nodes, nodes[1:]):
+        out.append(((a, b) if a < b else (b, a)) in tun)
+    return out
+
+
 def ekey(la, lo):
-    return "%.3f,%.3f" % (round(la / ELEV_ROUND) * ELEV_ROUND, round(lo / ELEV_ROUND) * ELEV_ROUND)
+    return "%.4f,%.4f" % (round(la / ELEV_ROUND) * ELEV_ROUND, round(lo / ELEV_ROUND) * ELEV_ROUND)
 
 
 def fill_elev(keys, cache, fetch=None):
@@ -227,9 +269,32 @@ def tile_elev(keys, z=TILE_Z, workers=8):
 def segments(samples, town_of, elev):
     """路線樣本點 [(格點鍵, 公里)] → 依序經過的鄉鎮段 [鄉鎮序號, 最低海拔, 最高海拔, 公里]。
     town_of：格點鍵 → 鄉鎮序號。只有一個點的夾心段（A、B、A）視為誤差，併回 A。"""
+    es = [elev.get(x[0]) for x in samples]
+    tun = [len(x) > 2 and x[2] for x in samples]
+    # 隧道裡的點：用前後最近的洞外點高度，依公里內插
+    i, n = 0, len(samples)
+    while i < n:
+        if not tun[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and tun[j]:
+            j += 1
+        a = i - 1 if i > 0 else None
+        b = j if j < n else None
+        ea = es[a] if a is not None else None
+        eb = es[b] if b is not None else None
+        for t in range(i, j):
+            if ea is not None and eb is not None:
+                ka, kb = samples[a][1], samples[b][1]
+                f = (samples[t][1] - ka) / (kb - ka) if kb > ka else 0
+                es[t] = int(round(ea + (eb - ea) * f))
+            else:
+                es[t] = ea if ea is not None else eb
+        i = j
     rows = []
-    for k, km in samples:
-        rows.append((town_of[k], elev.get(k), km))
+    for (k, km, *_), e in zip(samples, es):
+        rows.append((town_of[k], e, km))
     segs = []
     for ti, e, km in rows:
         if segs and segs[-1]["t"] == ti:
@@ -268,12 +333,16 @@ def osrm_route(base, o, c, session=None):
     url = "%s/route/v1/driving/%.5f,%.5f;%.5f,%.5f" % (base, o[1], o[0], c[1], c[0])
     for t in range(3):
         try:
-            r = s.get(url, params={"overview": "full", "geometries": "geojson", "steps": "false"}, timeout=60)
+            r = s.get(url, params={"overview": "full", "geometries": "geojson", "steps": "false",
+                                   "annotations": "nodes"}, timeout=60)
             js = r.json()
             if js.get("code") != "Ok" or not js.get("routes"):
                 return None
             rt = js["routes"][0]
-            return rt["geometry"]["coordinates"], rt["distance"] / 1000.0, rt["duration"] / 60.0
+            nodes = []
+            for leg in rt.get("legs") or []:
+                nodes += (leg.get("annotation") or {}).get("nodes") or []
+            return rt["geometry"]["coordinates"], rt["distance"] / 1000.0, rt["duration"] / 60.0, nodes
         except Exception as e:                  # noqa: BLE001
             print("OSRM 失敗（第 %d 次）：%s" % (t + 1, str(e)[:120]))
             time.sleep(2)
@@ -288,6 +357,7 @@ def main():
     ap.add_argument("--only", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=12)
+    ap.add_argument("--pbf", default=os.path.join(ROOT, "osrm", "taiwan.osm.pbf"))
     a = ap.parse_args()
 
     import build_weather as bw
@@ -299,6 +369,8 @@ def main():
     tix = TownIndex(towns)
     print("營地 %d（%s）、鄉鎮預報點 %d" % (len(camps), src or "資料庫頁", len(tix.keys)))
 
+    tun = load_tunnels(a.pbf)
+    stat = {"nodes_ok": 0, "nodes_bad": 0, "tun_pts": 0}
     origins = {k: v for k, v in ORIGINS.items() if not a.only or k in a.only.split(",")}
     sess = requests.Session()
     geo = {}       # (出發地, 營地鍵) -> (樣本點, 公里, 分鐘)
@@ -324,8 +396,14 @@ def main():
         r = osrm_route(a.osrm, o, d, sess)
         if not r:
             return j, None
-        coords, km, mins = r
-        return j, ([(ekey(la, lo), round(k, 2)) for la, lo, k in sample_line(coords)], km, mins)
+        coords, km, mins, nodes = r
+        if len(nodes) == len(coords):
+            stat["nodes_ok"] += 1
+        else:
+            stat["nodes_bad"] += 1
+        smp = sample_line(coords, tflags=tunnel_flags(coords, nodes, tun))
+        stat["tun_pts"] += sum(1 for x in smp if x[3])
+        return j, ([(ekey(la, lo), round(k, 2), t) for la, lo, k, t in smp], km, mins)
 
     with ThreadPoolExecutor(a.workers) as ex:
         for n, (j, res) in enumerate(ex.map(run, jobs)):
@@ -333,18 +411,16 @@ def main():
                 geo[(j[0], j[1])] = res
             if n and n % 2000 == 0:
                 print("  路線 %d/%d（%.0f 秒）" % (n, len(jobs), time.time() - t0), flush=True)
-    print("算出 %d 條，失敗 %d 條" % (len(geo), len(jobs) - len(geo)), flush=True)
+    print("算出 %d 條，失敗 %d 條；節點對得上 %d、對不上 %d；隧道內取樣點 %d" % (
+        len(geo), len(jobs) - len(geo), stat["nodes_ok"], stat["nodes_bad"], stat["tun_pts"]), flush=True)
 
+    # 地形圖磚每次重讀，不再存海拔快取檔（scripts/route_elev.json 是第一版留下的，已不使用）
     cache = {}
-    if os.path.exists(ELEV_CACHE):
-        cache = json.load(open(ELEV_CACHE, encoding="utf-8"))
     need = set()
     for smp, _, _ in geo.values():
-        for k, _ in smp:
-            need.add(k)
+        for x in smp:
+            need.add(x[0])
     fill_elev(need, cache)
-    with open(ELEV_CACHE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, separators=(",", ":"), sort_keys=True)
 
     town_of = tix.nearest_many(need)
     os.makedirs(a.out, exist_ok=True)
