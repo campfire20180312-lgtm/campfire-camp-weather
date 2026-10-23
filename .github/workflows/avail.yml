@@ -13,6 +13,9 @@ on:
       limit:
         description: '測試用：每個平台只查前幾家（0＝全部）'
         default: '0'
+      weekends:
+        description: '測試用：查幾個週末（3＝正式設定；填別的數字只測試，結果不提交）'
+        default: '3'
 
 permissions:
   contents: write
@@ -24,7 +27,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -49,11 +52,13 @@ jobs:
           PYTHONUNBUFFERED: '1'
           ONLY: ${{ inputs.only }}
           LIMIT: ${{ inputs.limit }}
+          WEEKENDS: ${{ inputs.weekends }}
         run: |
-          if [ -n "$ONLY" ]; then
+          W="${WEEKENDS:-3}"
+          if [ -n "$ONLY" ] || [ "$W" != "3" ]; then
             # 測試模式：結果不提交
-            python3 scripts/build_avail.py --out /tmp/avail_test.json --only "$ONLY" --limit "${LIMIT:-0}"
-            cat /tmp/avail_test.json | head -c 3000
+            python3 scripts/build_avail.py --out /tmp/avail_test.json --only "$ONLY" --limit "${LIMIT:-0}" --weekends "$W" --ic-budget 110
+            head -c 1500 /tmp/avail_test.json
           else
             python3 scripts/build_avail.py --out docs/avail.json
           fi
