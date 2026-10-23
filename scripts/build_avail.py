@@ -35,6 +35,8 @@ TPE = timezone(timedelta(hours=8))
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 GAP = 1.2          # 每家之間隔幾秒，壓低頻率
+IC_BUDGET = 40 * 60   # 愛露營最多跑 40 分鐘，超過就停（workflow 上限 75 分鐘）
+T0 = time.time()
 LOG = {"ic": [0, 0], "ec": [0, 0], "ac": [0, 0], "ct": [0, 0]}   # [成功, 失敗]
 
 
@@ -190,7 +192,7 @@ def parse_ic_calendar(text, year, month):
 
 async def ic_one(page, sid, nights):
     await page.goto("https://m.icamping.app/store/" + sid, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_function("document.body.innerText.includes('空位狀況')", timeout=45000)
+    await page.wait_for_function("document.body.innerText.includes('空位狀況')", timeout=25000)
     await page.wait_for_timeout(1500)
     got = {}
     for _ in range(3):
@@ -219,10 +221,22 @@ async def run_icamping(jobs, nights, conc=3):
         br = await p.chromium.launch()
         ctx = await br.new_context(user_agent=UA, locale="zh-TW", viewport={"width": 420, "height": 900})
 
+        t_ic = time.time()
+
         async def worker():
             page = await ctx.new_page()
             while not q.empty():
+                # 前 12 家全部失敗＝平台擋掉或改版，不要硬跑；超過時間預算也停
+                if LOG["ic"][0] == 0 and LOG["ic"][1] >= 12:
+                    print("::warning::愛露營前 12 家都失敗，停止查詢")
+                    break
+                if time.time() - t_ic > IC_BUDGET:
+                    print("::warning::愛露營超過時間預算，剩 %d 家沒查" % q.qsize())
+                    break
                 sid = q.get_nowait()
+                done = LOG["ic"][0] + LOG["ic"][1]
+                if done and done % 25 == 0:
+                    print("愛露營 已查 %d 家（成功 %d）" % (done, LOG["ic"][0]), flush=True)
                 try:
                     res[sid] = await ic_one(page, sid, nights)
                     LOG["ic"][0] += 1
@@ -279,7 +293,12 @@ def main():
     sess = requests.Session()
     sess.headers.update({"User-Agent": UA, "Accept-Language": "zh-TW,zh;q=0.9"})
     for k, fn in (("ec", q_easycamp), ("ac", q_asiacamp), ("ct", q_camptrip)):
-        for sid in sorted(jobs[k]):
+        for n_, sid in enumerate(sorted(jobs[k])):
+            if n_ and n_ % 25 == 0:
+                print("%s 已查 %d 家（成功 %d）" % (k, n_, LOG[k][0]), flush=True)
+            if n_ >= 8 and LOG[k][0] == 0:
+                print("::warning::%s 前 8 家都失敗，停止查詢" % k)
+                break
             try:
                 res[k][sid] = fn(sess, sid, nights)
                 LOG[k][0] += 1
@@ -309,6 +328,7 @@ def main():
 
     doc = {"generated": now.isoformat(timespec="minutes"),
            "nights": [n.isoformat() for n in nights],
+           "log": LOG,
            "c": out}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
