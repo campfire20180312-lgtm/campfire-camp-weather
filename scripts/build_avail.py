@@ -58,8 +58,19 @@ def nights_ahead(today, weekends=3):
 
 def load_camps():
     import base64
-    html = requests.get(DB_URL, headers={"User-Agent": UA}, timeout=60).text
-    m = re.search(r'var\s+S\s*=\s*"([A-Za-z0-9+/=]+)"', html)
+    m = None
+    for i in range(5):     # 網站偶爾回快取頁或忙碌頁，重試幾次
+        try:
+            r = requests.get(DB_URL, params={"av": int(time.time())},
+                             headers={"User-Agent": UA, "Cache-Control": "no-cache"}, timeout=90)
+            html = r.text
+            m = re.search(r'var\s+S\s*=\s*"([A-Za-z0-9+/=]+)"', html)
+            if m:
+                break
+            print("第 %d 次讀資料庫頁沒有內嵌資料：HTTP %s，%d 字" % (i + 1, r.status_code, len(html)))
+        except Exception as e:              # noqa: BLE001
+            print("第 %d 次讀資料庫頁失敗：%s" % (i + 1, str(e)[:120]))
+        time.sleep(20 * (i + 1))
     if not m:
         raise RuntimeError("找不到資料庫頁面的內嵌資料（var S）")
     code = base64.b64decode(m.group(1)).decode("utf-8")
