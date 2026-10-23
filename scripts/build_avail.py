@@ -177,7 +177,7 @@ def q_camptrip(sess, slug, nights):
 
 def parse_ic_calendar(text, year, month):
     """月曆文字 → {date: 值}。月曆開頭可能帶上個月最後幾天、結尾帶下個月頭幾天，日期歸零就換月。"""
-    m = re.search(r"日\s+一\s+二\s+三\s+四\s+五\s+六\s+(.*?)\s+\d{4}-\d{2}-\d{2}\s*空位狀況", text, re.S)
+    m = re.search(r"(?:[日一二三四五六]\s+){6}[日一二三四五六]\s+(.*?)\s+\d{4}-\d{2}-\d{2}\s*空位狀況", text, re.S)   # 週日或週六開頭都可以
     if not m:
         return {}
     tok = m.group(1).split()
@@ -216,7 +216,7 @@ def parse_ic_calendar(text, year, month):
 async def ic_one(page, sid, nights):
     await page.goto("https://m.icamping.app/store/" + sid, wait_until="domcontentloaded", timeout=60000)
     # 月曆標題「10月 2026 空位狀況」一開始就有，要等到月曆數字與「YYYY-MM-DD 空位狀況」表格出來才算載完
-    ready = r"/\d{4}-\d{2}-\d{2}\s*空位狀況/.test(document.body.innerText) && /日\s+一\s+二\s+三\s+四\s+五\s+六\s+\d+\s+\S+\s+\d+/.test(document.body.innerText)"
+    ready = r"/\d{4}-\d{2}-\d{2}\s*空位狀況/.test(document.body.innerText) && /(?:[日一二三四五六]\s+){6}[日一二三四五六]\s+\d+\s+\S+\s+\d+/.test(document.body.innerText)"
     try:
         await page.wait_for_function(ready, timeout=30000)
     except Exception:                       # noqa: BLE001
@@ -268,7 +268,7 @@ async def run_icamping(jobs, nights, conc=3):
         q.put_nowait(j)
     async with async_playwright() as p:
         br = await p.chromium.launch()
-        ctx = await br.new_context(user_agent=UA, locale="zh-TW", viewport={"width": 420, "height": 900})
+        ctx = await br.new_context(user_agent=UA, locale="zh-TW", timezone_id="Asia/Taipei", viewport={"width": 420, "height": 900})
 
         # 圖片、影片、字型不用載，省時間也減輕平台負擔
         async def _block(route):
