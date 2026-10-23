@@ -56,13 +56,17 @@ def nights_ahead(today, weekends=3):
     return out
 
 
+# 網站有時對 GitHub 的連線回 429（太頻繁），讀不到就用上一次成功的清單（存在 Actions 快取，只有 fid 與 plat）
+CACHE = os.path.join(HERE, "..", ".cache", "avail_camps.json")
+
+
 def load_camps():
     import base64
     m = None
-    for i in range(5):     # 網站偶爾回快取頁或忙碌頁，重試幾次
+    for i, wait in enumerate((0, 30, 90, 180)):
+        time.sleep(wait)
         try:
-            r = requests.get(DB_URL, params={"av": int(time.time())},
-                             headers={"User-Agent": UA, "Cache-Control": "no-cache"}, timeout=90)
+            r = requests.get(DB_URL, headers={"User-Agent": UA}, timeout=90)
             html = r.text
             m = re.search(r'var\s+S\s*=\s*"([A-Za-z0-9+/=]+)"', html)
             if m:
@@ -70,13 +74,21 @@ def load_camps():
             print("第 %d 次讀資料庫頁沒有內嵌資料：HTTP %s，%d 字" % (i + 1, r.status_code, len(html)))
         except Exception as e:              # noqa: BLE001
             print("第 %d 次讀資料庫頁失敗：%s" % (i + 1, str(e)[:120]))
-        time.sleep(20 * (i + 1))
     if not m:
-        raise RuntimeError("找不到資料庫頁面的內嵌資料（var S）")
+        if os.path.exists(CACHE):
+            with open(CACHE, encoding="utf-8") as f:
+                c = json.load(f)
+            print("::warning::資料庫頁讀不到，改用 %s 的營地清單（%d 家）" % (c["time"], len(c["camps"])))
+            return c["camps"]
+        raise RuntimeError("找不到資料庫頁面的內嵌資料（var S），也沒有快取")
     code = base64.b64decode(m.group(1)).decode("utf-8")
     data = _js_literal(code, "DATA")
-    camps = [r for r in data if r.get("plat") and not r.get("closed") and not r.get("bo") and not r.get("cp")]
+    camps = [{"fid": r["fid"], "plat": r["plat"]} for r in data
+             if r.get("plat") and not r.get("closed") and not r.get("bo") and not r.get("cp")]
     print("有訂位平台的營地 %d 家" % len(camps))
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    with open(CACHE, "w", encoding="utf-8") as f:
+        json.dump({"time": datetime.now(TPE).isoformat(timespec="minutes"), "camps": camps}, f, ensure_ascii=False)
     return camps
 
 
