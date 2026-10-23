@@ -1,0 +1,48 @@
+name: 週末空位每日更新
+
+# 2026-10-23 達哥要求：每天查一次「週末還訂得到的營地」
+# 台北時間每天 05:13 跑（GitHub 用 UTC，前一天 21:13）
+on:
+  schedule:
+    - cron: '13 21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: avail
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: |
+          pip install requests playwright
+          python -m playwright install --with-deps chromium
+
+      - name: 查四個平台的週末空位，產生 avail.json
+        run: python3 scripts/build_avail.py --out docs/avail.json
+
+      - name: 提交更新
+        if: always()
+        run: |
+          if [ ! -f docs/avail.json ]; then exit 0; fi
+          git config user.name  "campfire-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs/avail.json
+          git diff --staged --quiet && exit 0
+          git commit -m "avail: $(date -u +%Y-%m-%dT%H:%MZ)"
+          # 天氣 workflow 也會推，撞到就先拉最新再推
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && break
+            sleep 10
+          done
