@@ -192,9 +192,12 @@ def parse_ic_calendar(text, year, month):
 
 async def ic_one(page, sid, nights):
     await page.goto("https://m.icamping.app/store/" + sid, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_function("document.body.innerText.includes('空位狀況')", timeout=25000)
-    await page.wait_for_timeout(1500)
+    # 月曆標題「10月 2026 空位狀況」一開始就有，要等到月曆數字與「YYYY-MM-DD 空位狀況」表格出來才算載完
+    ready = r"/\d{4}-\d{2}-\d{2}\s*空位狀況/.test(document.body.innerText) && /日\s+一\s+二\s+三\s+四\s+五\s+六\s+\d+\s+\S+\s+\d+/.test(document.body.innerText)"
+    await page.wait_for_function(ready, timeout=30000)
+    await page.wait_for_timeout(600)
     got = {}
+    text = ""
     for _ in range(3):
         text = await page.inner_text("body")
         hm = re.search(r"(\d{1,2})月\s*(\d{4})\s*空位狀況", text)
@@ -203,12 +206,27 @@ async def ic_one(page, sid, nights):
         got.update(parse_ic_calendar(text, int(hm.group(2)), int(hm.group(1))))
         if all(n in got for n in nights):
             break
-        btn = page.get_by_text("下個月", exact=True)
+        btn = page.locator("text=下個月")
         if await btn.count() == 0:
             break
+        head = hm.group(0)
         await btn.first.click()
-        await page.wait_for_timeout(2500)
+        try:
+            await page.wait_for_function(
+                "h => !document.body.innerText.includes(h)", arg=head, timeout=8000)
+        except Exception:                   # noqa: BLE001
+            break
+        await page.wait_for_timeout(1200)
+    if not got:
+        if not DEBUG_SHOWN[0]:
+            DEBUG_SHOWN[0] = True
+            i = text.find("空位狀況")
+            print("愛露營月曆讀不出來，頁面文字：" + json.dumps(text[max(0, i - 40):i + 300], ensure_ascii=False))
+        raise RuntimeError("月曆讀不出來")
     return [got.get(n) for n in nights]
+
+
+DEBUG_SHOWN = [False]
 
 
 async def run_icamping(jobs, nights, conc=3):
@@ -220,6 +238,14 @@ async def run_icamping(jobs, nights, conc=3):
     async with async_playwright() as p:
         br = await p.chromium.launch()
         ctx = await br.new_context(user_agent=UA, locale="zh-TW", viewport={"width": 420, "height": 900})
+
+        # 圖片、影片、字型不用載，省時間也減輕平台負擔
+        async def _block(route):
+            if route.request.resource_type in ("image", "media", "font"):
+                await route.abort()
+            else:
+                await route.continue_()
+        await ctx.route("**/*", _block)
 
         t_ic = time.time()
 
