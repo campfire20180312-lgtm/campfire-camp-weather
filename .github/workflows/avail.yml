@@ -6,6 +6,13 @@ on:
   schedule:
     - cron: '13 21 * * *'
   workflow_dispatch:
+    inputs:
+      only:
+        description: '測試用：只查一個平台（ic／ec／ac／ct），留空＝全部並更新 avail.json'
+        default: ''
+      limit:
+        description: '測試用：每個平台只查前幾家（0＝全部）'
+        default: '0'
 
 permissions:
   contents: write
@@ -40,7 +47,16 @@ jobs:
       - name: 查四個平台的週末空位，產生 avail.json
         env:
           PYTHONUNBUFFERED: '1'
-        run: python3 scripts/build_avail.py --out docs/avail.json
+          ONLY: ${{ inputs.only }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          if [ -n "$ONLY" ]; then
+            # 測試模式：結果不提交
+            python3 scripts/build_avail.py --out /tmp/avail_test.json --only "$ONLY" --limit "${LIMIT:-0}"
+            cat /tmp/avail_test.json | head -c 3000
+          else
+            python3 scripts/build_avail.py --out docs/avail.json
+          fi
 
       - name: 存營地清單快取
         if: always() && hashFiles('.cache/avail_camps.json') != ''
