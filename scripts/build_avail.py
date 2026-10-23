@@ -217,7 +217,15 @@ async def ic_one(page, sid, nights):
     await page.goto("https://m.icamping.app/store/" + sid, wait_until="domcontentloaded", timeout=60000)
     # 月曆標題「10月 2026 空位狀況」一開始就有，要等到月曆數字與「YYYY-MM-DD 空位狀況」表格出來才算載完
     ready = r"/\d{4}-\d{2}-\d{2}\s*空位狀況/.test(document.body.innerText) && /日\s+一\s+二\s+三\s+四\s+五\s+六\s+\d+\s+\S+\s+\d+/.test(document.body.innerText)"
-    await page.wait_for_function(ready, timeout=30000)
+    try:
+        await page.wait_for_function(ready, timeout=30000)
+    except Exception:                       # noqa: BLE001
+        if not DEBUG_SHOWN[0]:
+            DEBUG_SHOWN[0] = True
+            t0 = await page.inner_text("body")
+            i = t0.find("空位狀況")
+            print("愛露營月曆等不到資料，頁面文字：" + json.dumps(t0[max(0, i - 200):i + 400], ensure_ascii=False))
+        raise
     await page.wait_for_timeout(600)
     got = {}
     text = ""
@@ -323,6 +331,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(HERE, "..", "docs", "avail.json"))
     ap.add_argument("--limit", type=int, default=0, help="測試用：每個平台只查前幾家")
+    ap.add_argument("--only", default="", help="測試用：只查這個平台（ic／ec／ac／ct）")
     args = ap.parse_args()
 
     now = datetime.now(TPE)
@@ -334,6 +343,8 @@ def main():
         for k, v in c["plat"].items():
             if k in jobs:
                 jobs[k].update(str(x) for x in ids(v))
+    if args.only:
+        jobs = {k: (v if k == args.only else set()) for k, v in jobs.items()}
     if args.limit:
         jobs = {k: set(sorted(v)[:args.limit]) for k, v in jobs.items()}
     print("要查：" + "、".join("%s %d" % (k, len(v)) for k, v in jobs.items()))
