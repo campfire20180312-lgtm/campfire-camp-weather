@@ -29,10 +29,25 @@ jobs:
           pip install requests playwright
           python -m playwright install --with-deps chromium
 
+      # 資料庫頁偶爾對 GitHub 回 429，取回上一次成功的營地清單（只有 fid 與訂位平台店家 id）備用
+      - name: 取回營地清單快取
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/avail_camps.json
+          key: avail-camps-${{ github.run_id }}
+          restore-keys: avail-camps-
+
       - name: 查四個平台的週末空位，產生 avail.json
         env:
           PYTHONUNBUFFERED: '1'
         run: python3 scripts/build_avail.py --out docs/avail.json
+
+      - name: 存營地清單快取
+        if: always() && hashFiles('.cache/avail_camps.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/avail_camps.json
+          key: avail-camps-${{ github.run_id }}
 
       - name: 提交更新
         if: always()
