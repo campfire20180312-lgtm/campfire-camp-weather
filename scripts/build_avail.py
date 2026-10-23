@@ -229,7 +229,7 @@ async def ic_one(page, sid, nights):
     await page.wait_for_timeout(600)
     got = {}
     text = ""
-    for _ in range(3):
+    for _ in range(6):     # 查兩個月以上要翻好幾頁月曆
         text = await page.inner_text("body")
         hm = re.search(r"(\d{1,2})月\s*(\d{4})\s*空位狀況", text)
         if not hm:
@@ -332,10 +332,15 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "..", "docs", "avail.json"))
     ap.add_argument("--limit", type=int, default=0, help="測試用：每個平台只查前幾家")
     ap.add_argument("--only", default="", help="測試用：只查這個平台（ic／ec／ac／ct）")
+    ap.add_argument("--weekends", type=int, default=3, help="查未來幾個週末（預設 3）")
+    ap.add_argument("--ic-budget", type=int, default=40, help="愛露營最多跑幾分鐘")
     args = ap.parse_args()
 
     now = datetime.now(TPE)
-    nights = nights_ahead(now.date())
+    global IC_BUDGET
+    IC_BUDGET = args.ic_budget * 60
+    nights = nights_ahead(now.date(), args.weekends)
+    print("查 %d 個週末、%d 晚：%s 到 %s" % (args.weekends, len(nights), nights[0], nights[-1]))
     camps = load_camps()
 
     jobs = {"ic": set(), "ec": set(), "ac": set(), "ct": set()}
@@ -393,6 +398,16 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
+    print("avail.json 大小 %.0f KB，總共花 %.1f 分鐘" % (os.path.getsize(args.out) / 1024, (time.time() - T0) / 60))
+    # 每一晚：各平台 有空位／滿／公休／未開放 幾家（判斷查遠的日期還有沒有意義）
+    print("日期        平台 有空 滿 公休 未開放")
+    for i, n in enumerate(nights):
+        for k in ("ic", "ec", "ac", "ct"):
+            vals = [r[k][i] for r in out.values() if k in r]
+            if not vals:
+                continue
+            print("%s %s %4d %3d %3d %4d" % (n.isoformat(), k, sum(1 for v in vals if v and v > 0),
+                  sum(1 for v in vals if v == 0), sum(1 for v in vals if v == -1), sum(1 for v in vals if v is None)))
     print("完成：%d 家有空位資料；各平台 成功/失敗：%s" % (len(out), json.dumps(LOG)))
     # 某個平台全部失敗（多半是平台改版或擋了 GitHub 的連線）就讓這次執行失敗，GitHub 會寄信通知
     dead = [k for k, (ok, ng) in LOG.items() if ng and not ok]
