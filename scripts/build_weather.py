@@ -1052,6 +1052,140 @@ def compose_towns(locs, elev, generated, rain=None, rain_time=None,
     }
 
 
+
+# 2026-10-24 達哥：林道地圖也要「未來雨量圖」「過去三天累積雨量圖」（照露營天氣地圖的色塊面）。
+# 林道頁不讀 6 MB 的 weather.json，改讀這份小檔 raingrid.json：
+#   - 預估：每個營地國際模式逐日預估雨量，20 公里內距離加權內插（沒有就取 40 公里內最近的營地），算到 0.05 度格點
+#   - 過去三天：氣象署雨量站過去 72 小時累積雨量，15 公里內距離加權（沒有就取 25 公里內最近的雨量站）
+#   - 只輸出格點的值、不輸出營地座標（座標留在資料庫頁，跟 weather.json 同一個原則）
+#   - 只留陸地附近的格點（scripts/tw_land.json，Natural Earth 10m 簡化；沒有這個檔就留營地 25 公里內的格點）
+RG_STEP = 0.05
+RG_W, RG_S, RG_E, RG_N = 119.25, 21.85, 122.10, 25.35
+RG_LAND = os.path.join(HERE, "tw_land.json")
+RG_KX = math.cos(23.7 * math.pi / 180) * 111.0
+
+
+def _rg_in_ring(lo, la, ring):
+    inside = False
+    j = len(ring) - 1
+    for i in range(len(ring)):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if (yi > la) != (yj > la) and lo < (xj - xi) * (la - yi) / ((yj - yi) or 1e-12) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _rg_bucket(pts):
+    """pts: [(la, lo, 值...)]，用 0.1 度格子分桶，找附近的點比較快。"""
+    b = {}
+    for p in pts:
+        b.setdefault((int(math.floor(p[0] * 10)), int(math.floor(p[1] * 10))), []).append(p)
+    return b
+
+
+def _rg_near(b, la, lo, rkm):
+    """回傳 rkm 公里內的 [(距離平方 km², 點)]。"""
+    by, bx = int(math.floor(la * 10)), int(math.floor(lo * 10))
+    n = int(math.ceil(rkm / 11.0)) + 1
+    out = []
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            for p in b.get((by + i, bx + j), ()):
+                dx = (p[1] - lo) * RG_KX
+                dy = (p[0] - la) * 111.0
+                d2 = dx * dx + dy * dy
+                if d2 <= rkm * rkm:
+                    out.append((d2, p))
+    return out
+
+
+def _rg_idw(near, k, r_in):
+    """near 裡第 k 個值的距離加權平均：r_in 公里內加權 1/(d²+4)；都沒有就取最近一個有值的點。"""
+    sw = sv = 0.0
+    best = None
+    for d2, p in near:
+        v = p[k]
+        if v is None:
+            continue
+        if best is None or d2 < best[0]:
+            best = (d2, v)
+        if d2 < r_in * r_in:
+            wt = 1.0 / (d2 + 4.0)
+            sw += wt
+            sv += wt * v
+    if sw > 0:
+        return sv / sw
+    return best[1] if best else None
+
+
+def _rg_round(v):
+    if v is None:
+        return None
+    return round(v, 1) if v < 10 else int(round(v))
+
+
+def compose_raingrid(camps, qpf, rain, rain_time, generated):
+    qpf = qpf or {}
+    dates = sorted({dt for q in qpf.values() for dt in (q.get("d") or {})})[:QPF_DAYS]
+    fc = []
+    for c in camps:
+        d = (qpf.get(c["n"]) or {}).get("d") or {}
+        if not d:
+            continue
+        fc.append((c["la"], c["lo"]) + tuple((d.get(dt) or {}).get("mm") for dt in dates))
+    ob = [(s["lat"], s["lon"], s["r72"]) for s in (rain or []) if s.get("r72") is not None]
+    if len(fc) < 50 and len(ob) < 50:
+        raise RuntimeError("預估雨量 %d 個營地、雨量站 %d 站，資料不夠畫雨量圖" % (len(fc), len(ob)))
+    bf, bo = _rg_bucket(fc), _rg_bucket(ob)
+    land = None
+    if os.path.exists(RG_LAND):
+        with open(RG_LAND, encoding="utf-8") as f:
+            land = json.load(f)
+        boxes = [(min(p[0] for p in r), max(p[0] for p in r), min(p[1] for p in r), max(p[1] for p in r))
+                 for r in land]
+    nx = int(round((RG_E - RG_W) / RG_STEP))
+    ny = int(round((RG_N - RG_S) / RG_STEP))
+    h = RG_STEP / 2
+    cells = []
+    for iy in range(ny):
+        la = RG_S + (iy + 0.5) * RG_STEP
+        for ix in range(nx):
+            lo = RG_W + (ix + 0.5) * RG_STEP
+            if land is not None:
+                ok = False
+                for (x, y) in ((lo, la), (lo - h, la - h), (lo + h, la - h), (lo - h, la + h), (lo + h, la + h)):
+                    for r, bb in zip(land, boxes):
+                        if bb[0] <= x <= bb[1] and bb[2] <= y <= bb[3] and _rg_in_ring(x, y, r):
+                            ok = True
+                            break
+                    if ok:
+                        break
+                if not ok:
+                    continue
+            nf = _rg_near(bf, la, lo, 40) if fc else []
+            if land is None and not any(d2 < 625 for d2, _ in nf):
+                continue
+            r72 = _rg_idw(_rg_near(bo, la, lo, 25), 2, 15) if ob else None
+            mm = [_rg_idw(nf, 2 + k, 20) for k in range(len(dates))]
+            if r72 is None and all(v is None for v in mm):
+                continue
+            cells.append([ix, iy, _rg_round(r72)] + [_rg_round(v) for v in mm])
+    return {
+        "v": 1,
+        "generated": generated,
+        "rainObsTime": rain_time,
+        "qpfSource": "Open-Meteo（ECMWF/GFS 等全球模式），非中央氣象署預報",
+        "obsSource": "中央氣象署雨量站（過去 72 小時累積）",
+        "w0": RG_W, "s0": RG_S, "d": RG_STEP, "nx": nx, "ny": ny,
+        "dates": dates,
+        "qpfCamps": len(fc), "obsStations": len(ob),
+        "cols": "ix,iy,r72,mm[dates]",
+        "c": cells,
+    }
+
+
 def check(camps):
     """寧可整批失敗，也不要安靜產出一包空值蓋掉好的資料。"""
     if len(camps) < 300:
@@ -1091,6 +1225,7 @@ def main():
     args = ap.parse_args()
 
     towns = None
+    raingrid = None
     if args.demo:
         from demo_data import make_demo
         payload = make_demo(LAPSE, adjust, wind_chill)
@@ -1159,6 +1294,11 @@ def main():
         payload = compose(camps, locs, elev, stamp,
                           rain, rain_time, quakes, warns, qpf)
         towns = compose_towns(locs, elev, stamp, rain, rain_time, quakes, warns)
+        # 2026-10-24：林道地圖的雨量色塊面；出錯不影響 weather.json
+        try:
+            raingrid = compose_raingrid(camps, qpf, rain, rain_time, stamp)
+        except Exception as e:                  # noqa: BLE001
+            print("::warning::雨量格點（raingrid.json）這次沒產生：%s" % str(e)[:300])
         if camp_src:
             payload["campSource"] = camp_src
 
@@ -1173,6 +1313,12 @@ def main():
             json.dump(towns, f, ensure_ascii=False, separators=(",", ":"))
         print("已寫入 %s（%d 個鄉鎮預報點，%.1f KB）" %
               (tout, towns["count"], os.path.getsize(tout) / 1024))
+    if raingrid:
+        gout = os.path.join(os.path.dirname(out), "raingrid.json")
+        with open(gout, "w", encoding="utf-8") as f:
+            json.dump(raingrid, f, ensure_ascii=False, separators=(",", ":"))
+        print("已寫入 %s（%d 個格點、%d 天，%.1f KB）" %
+              (gout, len(raingrid["c"]), len(raingrid["dates"]), os.path.getsize(gout) / 1024))
 
 
 if __name__ == "__main__":
