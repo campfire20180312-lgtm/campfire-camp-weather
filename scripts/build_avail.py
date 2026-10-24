@@ -102,13 +102,22 @@ def load_camps():
 def q_easycamp(sess, sid, nights):
     url = "https://www.easycamp.com.tw/Store_%s.html" % sid
     sess.get(url, timeout=40)
-    r = sess.post("https://www.easycamp.com.tw/ajax_store/daily_stocks_query",
-                  data={"start_date": nights[0].isoformat(),
-                        "end_date": (nights[-1] + timedelta(days=1)).isoformat(),
-                        "store_id": sid},
-                  headers={"X-Requested-With": "XMLHttpRequest", "Referer": url}, timeout=40)
-    js = r.json()
-    d = js.get("data") or {}
+    # 一次查太長（61 晚）平台會回空的，切成 30 天一段查（2026-10-24 試跑發現）
+    d = {}
+    s = nights[0]
+    while s <= nights[-1]:
+        e = min(s + timedelta(days=30), nights[-1] + timedelta(days=1))
+        r = sess.post("https://www.easycamp.com.tw/ajax_store/daily_stocks_query",
+                      data={"start_date": s.isoformat(), "end_date": e.isoformat(), "store_id": sid},
+                      headers={"X-Requested-With": "XMLHttpRequest", "Referer": url}, timeout=40)
+        try:
+            d.update(r.json().get("data") or {})
+        except ValueError:
+            if s == nights[0]:
+                raise          # 第一段就讀不到才算這家失敗；後段沒開放就當查不到
+        s = e
+        if s <= nights[-1]:
+            time.sleep(0.6)
     out = []
     for n in nights:
         v = d.get(n.isoformat())
