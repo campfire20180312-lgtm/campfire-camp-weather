@@ -365,24 +365,40 @@ def main():
     print("要查：" + "、".join("%s %d" % (k, len(v)) for k, v in jobs.items()))
 
     res = {k: {} for k in jobs}
-    sess = requests.Session()
-    sess.headers.update({"User-Agent": UA, "Accept-Language": "zh-TW,zh;q=0.9"})
-    for k, fn in (("ec", q_easycamp), ("ac", q_asiacamp), ("ct", q_camptrip)):
-        for n_, sid in enumerate(sorted(jobs[k])):
-            if n_ and n_ % 25 == 0:
-                print("%s 已查 %d 家（成功 %d）" % (k, n_, LOG[k][0]), flush=True)
-            if n_ >= 8 and LOG[k][0] == 0:
-                print("::warning::%s 前 8 家都失敗，停止查詢" % k)
-                break
-            try:
-                res[k][sid] = fn(sess, sid, nights)
-                LOG[k][0] += 1
-            except Exception as e:          # noqa: BLE001
-                LOG[k][1] += 1
-                print("%s %s 失敗：%s" % (k, sid, str(e)[:120]))
-            time.sleep(GAP)
+
+    def run_plain(keys):
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": UA, "Accept-Language": "zh-TW,zh;q=0.9"})
+        for k in keys:
+            fn = {"ec": q_easycamp, "ac": q_asiacamp, "ct": q_camptrip}[k]
+            t_k = time.time()
+            for n_, sid in enumerate(sorted(jobs[k])):
+                if n_ and n_ % 25 == 0:
+                    print("%s 已查 %d 家（成功 %d）" % (k, n_, LOG[k][0]), flush=True)
+                if n_ >= 8 and LOG[k][0] == 0:
+                    print("::warning::%s 前 8 家都失敗，停止查詢" % k)
+                    break
+                try:
+                    res[k][sid] = fn(sess, sid, nights)
+                    LOG[k][0] += 1
+                except Exception as e:      # noqa: BLE001
+                    LOG[k][1] += 1
+                    print("%s %s 失敗：%s" % (k, sid, str(e)[:120]))
+                time.sleep(GAP)
+            print("%s 完成，花 %.1f 分鐘" % (k, (time.time() - t_k) / 60), flush=True)
+
+    # 四個平台是不同網站，分三條同時跑（每個平台自己仍是一家一家慢慢查）：
+    # 露營樂→亞洲露營 一條、玩露TRIP（每晚一次查詢，最久）一條、愛露營（瀏覽器）在主程式
+    import threading
+    th = [threading.Thread(target=run_plain, args=(ks,)) for ks in (("ec", "ac"), ("ct",))]
+    for x in th:
+        x.start()
     if jobs["ic"]:
+        t_ic0 = time.time()
         res["ic"] = asyncio.run(run_icamping(sorted(jobs["ic"]), nights))
+        print("ic 完成，花 %.1f 分鐘" % ((time.time() - t_ic0) / 60), flush=True)
+    for x in th:
+        x.join()
 
     out = {}
     for c in camps:
