@@ -1,0 +1,62 @@
+name: 天氣更新失敗重跑
+
+# 2026-10-24 達哥：以後天氣資訊更新失敗都要 30 分鐘後重新更新一次，直到成功。
+# 「產生營地天氣資料」失敗（含國際模式、雨量站、特報、地震有一項沒抓到）→ 等 30 分鐘 → 重跑 → 還是失敗就再等 30 分鐘，
+# 直到成功；中間如果排程那次已經成功，就不再重跑。
+on:
+  workflow_run:
+    workflows: ["產生營地天氣資料"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+# 同一時間只留一個重跑任務在排隊
+concurrency:
+  group: weather-retry
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    # 只處理排程或手動那次的失敗；重跑任務自己觸發的那幾次，由下面的迴圈接手
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.triggering_actor.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      GH_TOKEN: ${{ github.token }}
+      R: ${{ github.repository }}
+      SINCE: ${{ github.event.workflow_run.created_at }}
+    steps:
+      - name: 30 分鐘後重跑，直到成功
+        run: |
+          done_ok() {
+            n=$(gh run list -R "$R" -w weather.yml --status success -L 20 --json createdAt \
+                -q "[.[] | select(.createdAt > \"$SINCE\")] | length")
+            [ "${n:-0}" != "0" ]
+          }
+          for i in $(seq 1 7); do
+            if done_ok; then echo "失敗之後已經有成功的更新，不用重跑"; exit 0; fi
+            echo "第 $i 次：等 30 分鐘後重跑"
+            sleep 1800
+            if done_ok; then echo "等待期間已經有成功的更新，不用重跑"; exit 0; fi
+            before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            gh workflow run weather.yml -R "$R"
+            id=""
+            for t in $(seq 1 30); do
+              sleep 10
+              id=$(gh run list -R "$R" -w weather.yml -e workflow_dispatch -L 5 --json databaseId,createdAt \
+                   -q "[.[] | select(.createdAt >= \"$before\")][0].databaseId")
+              [ -n "$id" ] && [ "$id" != "null" ] && break
+            done
+            if [ -z "$id" ] || [ "$id" = "null" ]; then echo "找不到剛觸發的那次，下一輪再試"; continue; fi
+            echo "重跑：https://github.com/$R/actions/runs/$id"
+            if gh run watch "$id" -R "$R" --exit-status --interval 60 > /dev/null; then
+              echo "重跑成功"; exit 0
+            fi
+            echo "重跑還是失敗"
+          done
+          echo "::error::連續重跑 7 次都失敗，等下一次排程"
+          exit 1

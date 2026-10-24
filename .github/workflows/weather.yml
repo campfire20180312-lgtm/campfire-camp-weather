@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write
 
+# 2026-10-24：重跑與排程不要同時跑，排隊一個一個來（避免同時推送互相打架）
+concurrency:
+  group: weather
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -69,6 +74,15 @@ jobs:
         with:
           path: .cache/camps.enc
           key: camps-${{ github.run_id }}
+
+      # 2026-10-24 達哥：更新失敗要 30 分鐘後重跑直到成功。
+      # 有哪一項資料沒抓到（國際模式雨量／陣風、雨量站、特報、地震），這次就算失敗，weather-retry.yml 會在 30 分鐘後重跑。
+      - name: 檢查這次有沒有資料沒抓到
+        run: |
+          if [ -f .cache/PARTIAL ]; then
+            while IFS= read -r line; do echo "::error::這次沒抓到 $line"; done < .cache/PARTIAL
+            exit 1
+          fi
 
       # 天氣照常更新了，但營地清單用的是舊快取：故意讓這次執行失敗，GitHub 會寄信通知。
       - name: 檢查是否用了舊營地清單
