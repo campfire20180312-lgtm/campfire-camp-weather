@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 # 2026-10-24：重跑與排程不要同時跑，排隊一個一個來（避免同時推送互相打架）
 concurrency:
@@ -15,7 +16,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 2026-10-24 達哥：天氣資料要準時更新。GitHub 的排程常晚 2～3 小時、有時整個跳過，
+  # 現在主要靠 weather-clock.yml 每 3 小時準時觸發（手動觸發不受影響）；這裡的排程留著當備援。
+  # 排程那次如果晚到，而這 100 分鐘內已經有成功的更新，或正有一次在跑，就跳過，不重複抓。
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.g.outputs.go }}
+    steps:
+      - id: g
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          EV: ${{ github.event_name }}
+          ME: ${{ github.run_id }}
+        run: |
+          if [ "$EV" != "schedule" ]; then echo "go=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          busy=$(gh run list -R "$R" -w weather.yml -L 10 --json databaseId,status \
+                 -q "[.[] | select(.databaseId != $ME and (.status == \"in_progress\" or .status == \"queued\" or .status == \"waiting\"))] | length")
+          last=$(gh run list -R "$R" -w weather.yml -L 10 --json databaseId,status,conclusion \
+                 -q "[.[] | select(.databaseId != $ME and .status == \"completed\")][0].conclusion")
+          ts=$(gh api "repos/$R/commits?path=docs/weather.json&per_page=1" -q '.[0].commit.committer.date')
+          age=$(( ( $(date -u +%s) - $(date -u -d "$ts" +%s) ) / 60 ))
+          echo "上一次更新 $ts（$age 分鐘前），上一次執行結果 $last，正在跑 $busy 個"
+          if [ "${busy:-0}" != "0" ]; then echo "已經有一次在跑，這次排程跳過"; echo "go=0" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$last" = "success" ] && [ "$age" -lt 100 ]; then echo "資料 $age 分鐘前才更新過，這次排程跳過"; echo "go=0" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "go=1" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: gate
+    if: needs.gate.outputs.go == '1'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +80,16 @@ jobs:
           export CWA_API_KEY="$(printf '%s' "$CWA_API_KEY_RAW" | tr -d '[:space:]')"
           python3 scripts/build_weather.py --out docs/weather.json
 
+      # 2026-10-24 達哥：逐 3 小時預報（各縣市鄉鎮未來 3 天）。出錯只記警告，不影響 weather.json
+      - name: 逐 3 小時預報（wx3h.json）
+        continue-on-error: true
+        env:
+          CWA_API_KEY_RAW: ${{ secrets.CWA_API_KEY }}
+        run: |
+          export CWA_API_KEY="$(printf '%s' "$CWA_API_KEY_RAW" | tr -d '[:space:]')"
+          python3 scripts/build_wx3h.py --inspect || true
+          python3 scripts/build_wx3h.py --out docs/wx3h.json || { echo "::warning::逐 3 小時預報這次沒產生"; git checkout -- docs/wx3h.json 2>/dev/null || true; }
+
       - name: 提交更新
         run: |
           git config user.name  "campfire-bot"
@@ -57,7 +97,15 @@ jobs:
           git add docs/weather.json docs/towns.json scripts/town_elev.json
           # 2026-10-24：林道地圖的雨量格點
           if [ -f docs/raingrid.json ]; then git add docs/raingrid.json; fi
+          # 2026-10-24：逐 3 小時預報
+          if [ -f docs/wx3h.json ]; then git add docs/wx3h.json; fi
           git diff --staged --quiet || git commit -m "weather: $(date -u +%Y-%m-%dT%H:%MZ)"
+          # 2026-10-24：空位、路線的 workflow 也會推，撞到就先拉最新再推
+          for i in 1 2 3; do
+            git push && break
+            git pull --rebase origin main
+            sleep 5
+          done
           git push
 
       - name: 加密新的營地快取
