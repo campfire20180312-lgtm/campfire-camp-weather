@@ -3,7 +3,7 @@
 
 1. 從 campfiretw.com/camp-database/ 頁面內嵌的 DATA 取出每家營地的訂位平台店家（plat 欄位）
    plat = {ic 愛露營, ec 露營樂, ac 亞洲露營, ct 玩露TRIP}；同平台兩家店時值是陣列
-2. 查未來三個週末的週五、週六晚還剩幾帳
+2. 查未來三個週末的週五、週六晚還剩幾帳（--days N：改查從今晚起連續 N 晚，每一晚都存）
    - 露營樂：POST /ajax_store/daily_stocks_query，回每天剩餘帳數（Sum_Stocks，含所有營位型態）
    - 亞洲露營：API enable-rooms 取營位名稱（自備帳篷＝自搭帳），rooms-period-price-availability 取每晚剩餘
    - 玩露TRIP：營區頁拿 CSRF 再 POST checkAvailability，回可訂營位；房間、露營車、狩獵帳不算
@@ -42,6 +42,11 @@ LOG = {"ic": [0, 0], "ec": [0, 0], "ac": [0, 0], "ct": [0, 0]}   # [成功, 失�
 
 def ids(v):
     return v if isinstance(v, list) else [v]
+
+
+def nights_daily(today, days):
+    """從今晚起連續 days 晚（指定日期查空位用，2026-10-24 達哥同意改成兩個月每一晚）。"""
+    return [today + timedelta(days=i) for i in range(days)]
 
 
 def nights_ahead(today, weekends=3):
@@ -333,14 +338,19 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="測試用：每個平台只查前幾家")
     ap.add_argument("--only", default="", help="測試用：只查這個平台（ic／ec／ac／ct）")
     ap.add_argument("--weekends", type=int, default=3, help="查未來幾個週末（預設 3）")
+    ap.add_argument("--days", type=int, default=0, help="大於 0 就改查從今晚起連續幾晚（每一晚都存）")
     ap.add_argument("--ic-budget", type=int, default=40, help="愛露營最多跑幾分鐘")
     args = ap.parse_args()
 
     now = datetime.now(TPE)
     global IC_BUDGET
     IC_BUDGET = args.ic_budget * 60
-    nights = nights_ahead(now.date(), args.weekends)
-    print("查 %d 個週末、%d 晚：%s 到 %s" % (args.weekends, len(nights), nights[0], nights[-1]))
+    if args.days > 0:
+        nights = nights_daily(now.date(), args.days)
+        print("查連續 %d 晚：%s 到 %s" % (len(nights), nights[0], nights[-1]))
+    else:
+        nights = nights_ahead(now.date(), args.weekends)
+        print("查 %d 個週末、%d 晚：%s 到 %s" % (args.weekends, len(nights), nights[0], nights[-1]))
     camps = load_camps()
 
     jobs = {"ic": set(), "ec": set(), "ac": set(), "ct": set()}
