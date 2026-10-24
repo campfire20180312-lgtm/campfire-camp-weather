@@ -55,6 +55,8 @@ jobs:
           git config user.name  "campfire-bot"
           git config user.email "bot@users.noreply.github.com"
           git add docs/weather.json docs/towns.json scripts/town_elev.json
+          # 2026-10-24：林道地圖的雨量格點
+          if [ -f docs/raingrid.json ]; then git add docs/raingrid.json; fi
           git diff --staged --quiet || git commit -m "weather: $(date -u +%Y-%m-%dT%H:%MZ)"
           git push
 
