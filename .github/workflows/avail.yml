@@ -16,6 +16,9 @@ on:
       weekends:
         description: '測試用：查幾個週末（3＝正式設定；填別的數字只測試，結果不提交）'
         default: '3'
+      days:
+        description: '測試用：填 61＝查從今晚起連續 61 晚（每一晚都存），0＝照週末設定；填了只測試，結果不提交'
+        default: '0'
 
 permissions:
   contents: write
@@ -53,11 +56,13 @@ jobs:
           ONLY: ${{ inputs.only }}
           LIMIT: ${{ inputs.limit }}
           WEEKENDS: ${{ inputs.weekends }}
+          DAYS: ${{ inputs.days }}
         run: |
           W="${WEEKENDS:-3}"
-          if [ -n "$ONLY" ] || [ "$W" != "3" ]; then
+          D="${DAYS:-0}"
+          if [ -n "$ONLY" ] || [ "$W" != "3" ] || [ "$D" != "0" ]; then
             # 測試模式：結果不提交
-            python3 scripts/build_avail.py --out /tmp/avail_test.json --only "$ONLY" --limit "${LIMIT:-0}" --weekends "$W" --ic-budget 110
+            python3 scripts/build_avail.py --out /tmp/avail_test.json --only "$ONLY" --limit "${LIMIT:-0}" --weekends "$W" --days "$D" --ic-budget 110
             head -c 1500 /tmp/avail_test.json
           else
             python3 scripts/build_avail.py --out docs/avail.json
