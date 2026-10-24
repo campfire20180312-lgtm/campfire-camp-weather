@@ -2,8 +2,12 @@ name: 天氣更新準時鐘
 
 # 2026-10-24 達哥：天氣資料要準時更新（GitHub 排程常晚 2～3 小時，有時整個跳過）。
 # 手動觸發（workflow_dispatch）不會被延遲，所以用一個「鐘」接力：
-#   每一棒等到下一個班次 → 觸發「產生營地天氣資料」→ 交棒給下一棒（再觸發自己）→ 結束。
-# 班次（台灣時間）：02:40、05:40、08:40、11:40、14:40、17:40、20:40、23:40（跟原本排程同一組）。
+#   每一棒每 10 分鐘看一次，跑大約 5 個半小時後交棒給下一棒（再觸發自己）。
+#   1. 準時班次（台灣時間 02:40、05:40、08:40、11:40、14:40、17:40、20:40、23:40）：
+#      資料 60 分鐘內沒更新、也沒有在跑，就觸發「產生營地天氣資料」。
+#   2. 失敗重跑（2026-10-25 起由鐘接手）：最近一次天氣更新失敗、已經過 30 分鐘、也沒有在跑，就重跑，直到成功。
+#      原因：鐘觸發的那幾次是 GitHub 機器人觸發的，失敗時 weather-retry.yml 不會被叫起來
+#      （10/25 02:40 那班氣象署連不上失敗，就沒有重跑）。
 # 底下的每小時排程是備援：鐘斷掉（例如 GitHub 故障）時，一小時內自己接回來；鐘還在跑時，備援那次馬上結束。
 # 公開的儲存庫，GitHub 提供的執行時間不收費。
 on:
@@ -22,45 +26,56 @@ permissions:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 200
+    timeout-minutes: 350
     env:
       GH_TOKEN: ${{ github.token }}
       R: ${{ github.repository }}
       ME: ${{ github.run_id }}
       HANDOFF: ${{ inputs.handoff }}
     steps:
-      - name: 等到下一個班次，觸發天氣更新，再交棒
+      - name: 每 10 分鐘看一次：準時班次觸發、失敗 30 分鐘後重跑，約 5 個半小時後交棒
         run: |
-          others() {   # 別的鐘（不含自己）正在跑或排隊的數量；$1=older 只算比自己早建立的
-            gh run list -R "$R" -w weather-clock.yml -L 20 --json databaseId,status,createdAt \
+          others() {   # 別的鐘（不含自己）正在跑或排隊的數量
+            gh run list -R "$R" -w weather-clock.yml -L 20 --json databaseId,status \
               -q "[.[] | select(.databaseId != $ME and (.status == \"in_progress\" or .status == \"queued\" or .status == \"waiting\" or .status == \"pending\"))] | length"
           }
-          older() {
+          older() {    # 比自己早開、還在跑的鐘
             mine=$(gh run view "$ME" -R "$R" --json createdAt -q .createdAt)
             gh run list -R "$R" -w weather-clock.yml -L 20 --json databaseId,status,createdAt \
               -q "[.[] | select(.databaseId != $ME and .status == \"in_progress\" and .createdAt < \"$mine\")] | length"
           }
+          tw() { TZ=Asia/Taipei date -d "@$1" '+%m/%d %H:%M'; }
+          tick() {
+            now=$(date -u +%s)
+            runs=$(gh run list -R "$R" -w weather.yml -L 10 --json status,conclusion,updatedAt) || return 0
+            busy=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
+            if [ "${busy:-0}" != "0" ]; then echo "$(tw $now) 天氣更新正在跑"; return 0; fi
+            lc=$(echo "$runs" | jq -r '[.[] | select(.status == "completed")][0].conclusion')
+            lu=$(echo "$runs" | jq -r '[.[] | select(.status == "completed")][0].updatedAt')
+            ts=$(gh api "repos/$R/commits?path=docs/weather.json&per_page=1" -q '.[0].commit.committer.date') || return 0
+            age=$(( (now - $(date -u -d "$ts" +%s)) / 60 ))
+            since=$(( (now - $(date -u -d "$lu" +%s)) / 60 ))
+            m=$(date -u +%M); h=$(date -u +%H)
+            if [ "$((10#$m))" = "40" ] && [ "$((10#$h % 3))" = "0" ]; then
+              if [ "$age" -ge 60 ]; then gh workflow run weather.yml -R "$R" && echo "$(tw $now) 準時班次：觸發天氣更新（上一次是 $age 分鐘前）"
+              else echo "$(tw $now) 準時班次：資料 $age 分鐘前才更新過，不另外觸發"; fi
+            elif [ "$lc" = "failure" ] && [ "$since" -ge 30 ]; then
+              gh workflow run weather.yml -R "$R" && echo "$(tw $now) 上一次天氣更新失敗（$since 分鐘前），重跑"
+            fi
+          }
           # 備援排程或手動啟動：已經有鐘在跑就不用再開一個
           if [ "$HANDOFF" != "1" ] && [ "$(others)" != "0" ]; then echo "鐘已經在跑，這次不用"; exit 0; fi
 
-          now=$(date -u +%s)
-          # 下一個班次：UTC 每 3 小時的 :40（00:40、03:40 … 21:40）
-          base=$(( now / 10800 * 10800 + 2400 ))
-          next=$base; while [ "$next" -le $(( now + 60 )) ]; do next=$(( next + 10800 )); done
-          echo "下一個班次：$(TZ=Asia/Taipei date -d @$next '+%m/%d %H:%M')（台灣時間），等 $(( (next - now) / 60 )) 分鐘"
-          sleep $(( next - now ))
-
-          # 兩個鐘同時在跑（很少見）：比較晚開的那個退出
-          if [ "$(older)" != "0" ]; then echo "有比較早的鐘在跑，這個退出"; exit 0; fi
-
-          busy=$(gh run list -R "$R" -w weather.yml -L 10 --json status \
-                 -q '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting")] | length')
-          ts=$(gh api "repos/$R/commits?path=docs/weather.json&per_page=1" -q '.[0].commit.committer.date')
-          age=$(( ( $(date -u +%s) - $(date -u -d "$ts" +%s) ) / 60 ))
-          if [ "${busy:-0}" != "0" ]; then echo "天氣更新正在跑，這班不另外觸發"
-          elif [ "$age" -lt 60 ]; then echo "資料 $age 分鐘前才更新過，這班不另外觸發"
-          else gh workflow run weather.yml -R "$R" && echo "已觸發天氣更新（上一次是 $age 分鐘前）"
-          fi
+          start=$(date -u +%s)
+          while :; do
+            now=$(date -u +%s)
+            next=$(( (now / 600 + 1) * 600 ))
+            if [ $(( next - start )) -gt 19800 ]; then break; fi
+            sleep $(( next - now ))
+            # 兩個鐘同時在跑（很少見）：比較晚開的那個退出
+            if [ "$(older)" != "0" ]; then echo "有比較早的鐘在跑，這個退出"; exit 0; fi
+            tick || true
+          done
 
           # 交棒：最多試 5 次，交不出去就讓備援排程接
           for i in 1 2 3 4 5; do
