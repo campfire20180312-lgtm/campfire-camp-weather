@@ -156,6 +156,15 @@ CACHE_DIR = os.path.join(HERE, "..", ".cache")
 CACHE_FILE = os.path.join(CACHE_DIR, "camps.json")
 
 
+def partial(what, e):
+    """2026-10-24 達哥：更新失敗要 30 分鐘後重跑直到成功。
+    哪一項資料這次沒抓到就記進 .cache/PARTIAL，workflow 最後一步看到它會讓這次執行算失敗，
+    weather-retry.yml 會在 30 分鐘後重跑。"""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(os.path.join(CACHE_DIR, "PARTIAL"), "a", encoding="utf-8") as f:
+        f.write("%s：%s\n" % (what, str(e)[:200]))
+
+
 def load_camps_safe():
     os.makedirs(CACHE_DIR, exist_ok=True)
     try:
@@ -252,6 +261,7 @@ def fetch_rain(key):
         js = _get(CWA_BASE + RAIN_DATASET, params, 120).json()
     except Exception as e:                      # noqa: BLE001
         print("雨量站抓取失敗，這次略過：%s" % e)
+        partial("雨量站", e)
         return [], None
 
     rec = js.get("records", js)
@@ -334,6 +344,7 @@ def fetch_gust_ens(camps):
             js = _get(QPF_URL, params, 120).json()
         except Exception as e:                  # noqa: BLE001
             print("多模式陣風抓取失敗，這次沿用單一模式：%s" % e)
+            partial("多模式陣風", e)
             return {}
         rows = js if isinstance(js, list) else [js]
         if len(rows) != len(chunk):
@@ -378,6 +389,7 @@ def fetch_qpf(camps):
             js = _get(QPF_URL, params, 90).json()
         except Exception as e:                  # noqa: BLE001
             print("預估雨量抓取失敗，這次略過：%s" % e)
+            partial("預估雨量（國際模式）", e)
             return {}
         rows = js if isinstance(js, list) else [js]
         if len(rows) != len(chunk):
@@ -441,6 +453,7 @@ def fetch_warnings(key):
         js = _get(CWA_BASE + WARN_DATASET, {"Authorization": key, "format": "JSON"}, 120).json()
     except Exception as e:                      # noqa: BLE001
         print("天氣特報抓取失敗，這次略過：%s" % e)
+        partial("天氣特報", e)
         return {}
     rec = js.get("records", js)
     locs = rec.get("location") or rec.get("Location") or []
@@ -574,6 +587,7 @@ def fetch_quakes(key, now=None):
             js = _get(CWA_BASE + ds, params, 120).json()
         except Exception as e:                  # noqa: BLE001
             print("地震 %s 抓取失敗，略過：%s" % (ds, e))
+            partial("地震 " + ds, e)
             continue
         rec = js.get("records", js)
         raw = rec.get("Earthquake") or rec.get("earthquake") or []
@@ -1129,6 +1143,7 @@ def main():
             ens = fetch_gust_ens(camps)
         except Exception as e:                  # noqa: BLE001
             print("多模式陣風出錯，沿用單一模式：%s" % e)
+            partial("多模式陣風", e)
             ens = {}
         for nm, days in ens.items():
             q = qpf.get(nm)
