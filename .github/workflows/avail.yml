@@ -90,7 +90,11 @@ jobs:
           git diff --staged --quiet && exit 0
           git commit -m "avail: $(date -u +%Y-%m-%dT%H:%MZ)"
           # 天氣 workflow 也會推，撞到就先拉最新再推
+          # 2026-11-02：兩次空位查詢重疊時 avail.json 會衝突，以這次新查的為準（-X theirs＝保留本機這次的提交）；三次都推不上去就讓這步失敗
+          ok=0
           for i in 1 2 3; do
-            git pull --rebase origin main && git push && break
+            if git pull --rebase -X theirs origin main && git push; then ok=1; break; fi
+            git rebase --abort 2>/dev/null || true
             sleep 10
           done
+          [ "$ok" = 1 ] || { echo "::error::avail.json 推不上去"; exit 1; }
