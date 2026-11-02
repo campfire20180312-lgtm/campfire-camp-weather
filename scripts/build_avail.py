@@ -4,6 +4,7 @@
 1. 從 campfiretw.com/camp-database/ 頁面內嵌的 DATA 取出每家營地的訂位平台店家（plat 欄位）
    plat = {ic 愛露營, ec 露營樂, ac 亞洲露營, ct 玩露TRIP}；同平台兩家店時值是陣列
 2. 查未來三個週末的週五、週六晚還剩幾帳（--days N：改查從今晚起連續 N 晚，每一晚都存）
+   2026-11-02 達哥：正式設定從 61 晚延長到 120 晚
    - 露營樂：POST /ajax_store/daily_stocks_query，回每天剩餘帳數（Sum_Stocks，含所有營位型態）
    - 亞洲露營：API enable-rooms 取營位名稱（自備帳篷＝自搭帳），rooms-period-price-availability 取每晚剩餘
    - 玩露TRIP：營區頁拿 CSRF 再 POST checkAvailability，回可訂營位；房間、露營車、狩獵帳不算
@@ -137,18 +138,25 @@ def q_asiacamp(sess, cid, nights):
         beds = " ".join(b.get("type", "") for b in (rm.get("beds") or []))
         if "自備帳篷" in beds or re.search(r"自搭|車宿|營位", rm.get("name", "")):
             self_ids.add(rm.get("id"))
-    js = sess.get(AC + "rooms-period-price-availability",
-                  params={"camp_id": cid, "start": nights[0].isoformat(),
-                          "end": (nights[-1] + timedelta(days=1)).isoformat(), "person_count": 2},
-                  timeout=40).json()
+    # 2026-11-02 改成 120 晚：一次查太長怕平台回空的，跟露營樂一樣切成 30 天一段查
     per = {}
-    for x in js.get("data") or []:
-        cd = x.get("customData") or {}
-        if self_ids and cd.get("room_id") not in self_ids:
-            continue
-        per.setdefault(x.get("dates"), 0)
-        if cd.get("available"):
-            per[x["dates"]] += int(cd.get("remain") or 0)
+    s = nights[0]
+    while s <= nights[-1]:
+        e = min(s + timedelta(days=30), nights[-1] + timedelta(days=1))
+        js = sess.get(AC + "rooms-period-price-availability",
+                      params={"camp_id": cid, "start": s.isoformat(),
+                              "end": e.isoformat(), "person_count": 2},
+                      timeout=40).json()
+        for x in js.get("data") or []:
+            cd = x.get("customData") or {}
+            if self_ids and cd.get("room_id") not in self_ids:
+                continue
+            per.setdefault(x.get("dates"), 0)
+            if cd.get("available"):
+                per[x["dates"]] += int(cd.get("remain") or 0)
+        s = e
+        if s <= nights[-1]:
+            time.sleep(0.6)
     return [per.get(n.isoformat()) for n in nights]
 
 
@@ -243,7 +251,7 @@ async def ic_one(page, sid, nights):
     await page.wait_for_timeout(600)
     got = {}
     text = ""
-    for _ in range(6):     # 查兩個月以上要翻好幾頁月曆
+    for _ in range(8):     # 查兩個月以上要翻好幾頁月曆（2026-11-02 改 120 晚，最多跨 5 個月）
         text = await page.inner_text("body")
         hm = re.search(r"(\d{1,2})月\s*(\d{4})\s*空位狀況", text)
         if not hm:
