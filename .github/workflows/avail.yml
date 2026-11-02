@@ -1,6 +1,7 @@
 name: 週末空位每日更新
 
 # 2026-10-24 起正式設定查兩個月內每一晚
+# 2026-11-02 達哥：延長到 120 晚（約四個月），試跑 38 分鐘、avail.json 237 KB
 
 # 2026-10-23 達哥要求：每天查一次「週末還訂得到的營地」
 # 台北時間每天 05:13 跑（GitHub 用 UTC，前一天 21:13）
@@ -19,7 +20,7 @@ on:
         description: '測試用：查幾個週末（3＝正式設定；填別的數字只測試，結果不提交）'
         default: '3'
       days:
-        description: '測試用：填 61＝查從今晚起連續 61 晚（每一晚都存），0＝照週末設定；填了只測試，結果不提交'
+        description: '測試用：填 120＝查從今晚起連續 120 晚（每一晚都存），0＝照週末設定；填了只測試，結果不提交'
         default: '0'
 
 permissions:
@@ -68,7 +69,8 @@ jobs:
             head -c 1500 /tmp/avail_test.json
           else
             # 2026-10-24 達哥：改成從今晚起連續 61 晚每一晚都存（網頁可以指定日期看空位）
-            python3 scripts/build_avail.py --out docs/avail.json --days 61 --ic-budget 70
+            # 2026-11-02 達哥：延長到 120 晚
+            python3 scripts/build_avail.py --out docs/avail.json --days 120 --ic-budget 110
           fi
 
       - name: 存營地清單快取
