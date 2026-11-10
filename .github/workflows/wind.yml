@@ -1,0 +1,67 @@
+name: 風場圖資料（氣象署 3 公里模式）
+
+# 2026-11-10 達哥：天氣頁地圖的「風場」上線。
+# 氣象署區域預報模式（開放資料 M-A0064）一天 4 批（UTC 00、06、12、18 起算），大約起算後 6 個半小時上架。
+# 每 3 小時看一次：剛上架那一班抓新的，隔 3 小時那一班當備援（同一批就不重抓，幾秒就結束）。
+# 台灣時間 09:25、12:25、15:25、18:25、21:25、00:25、03:25、06:25（GitHub 用 UTC，排程晚一點到沒關係）
+on:
+  schedule:
+    - cron: '25 1,4,7,10,13,16,19,22 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wind
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install numpy pillow
+
+      # 來源檔一個約 180 MB，只抓 10 米風那兩段（不需要授權碼）。氣象署正在換新一批時這次不更新，下一班再抓。
+      - name: 抓 10 米風、轉成小圖檔（docs/wind/）
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python3 scripts/build_wind.py --out docs/wind --skip-same
+
+      - name: 提交更新
+        run: |
+          git config user.name  "campfire-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs/wind
+          git diff --staged --quiet && { echo "沒有新資料"; exit 0; }
+          git commit -m "wind: $(date -u +%Y-%m-%dT%H:%MZ)"
+          # 天氣、空位的 workflow 也會推，撞到就先拉最新再推
+          ok=0
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push; then ok=1; break; fi
+            git rebase --abort 2>/dev/null || true
+            sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "::error::風場資料推不上去"; exit 1; }
+
+      # 正常情況手上的資料最舊大約 16 小時（起算後 6 個半小時上架、6 小時一批、加上排程間隔）。超過 30 小時代表連續幾班都沒抓到，讓這次算失敗，GitHub 會寄信。
+      - name: 檢查資料有沒有太舊
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          from datetime import datetime, timezone
+          m = json.load(open('docs/wind/wind.json', encoding='utf-8'))
+          run = datetime.strptime(m['run'], '%Y-%m-%dT%H:%MZ').replace(tzinfo=timezone.utc)
+          age = (datetime.now(timezone.utc) - run).total_seconds() / 3600
+          print('風場資料起算 %s，已經 %.1f 小時' % (m['run'], age))
+          if age > 30:
+              print('::error::風場資料超過 30 小時沒更新（起算 %s）' % m['run'])
+              sys.exit(1)
+          PY
