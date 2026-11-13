@@ -56,6 +56,11 @@ QPF_URL = "https://api.open-meteo.com/v1/forecast"
 QPF_BATCH = 80        # 一次帶幾個座標
 # 氣象署只發一週，第八天之後只剩國際模式，所以抓 14 天，後面那幾天標成參考值
 QPF_DAYS = 14
+# 2026-11-14 達哥：國際模式被限流（429），改成「10 公里一格＋一天抓 4 次＋抓不到沿用上一次」
+OM_EVERY_H = 5        # 上一次成功不到 5 小時就沿用（天氣每 3 小時更新 → 國際模式約一天抓 4 次）
+OM_KEEP_H = 24        # 抓不到時沿用 24 小時內最後一次成功的資料
+OM_RETRY_MIN = 60     # 被拒絕後 60 分鐘內不再去抓
+OM_PER_MIN = 480      # 每分鐘最多送幾次（免費版上限 600，留一點餘裕）
 
 # 環境氣溫遞減率（°C / 100m）。營火部落資料庫既有說明用 0.6，這裡保持一致。
 # 乾空氣約 1.0、飽和空氣約 0.5，台灣山區多濕，0.55~0.65 都算合理。
@@ -82,11 +87,16 @@ def _get(url, params=None, timeout=120, tries=3):
     for i in range(tries):
         try:
             r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code == 429:
+                # 2026-11-14：被限流時把對方給的原因記下來（每分鐘、每小時還是每天上限）
+                raise RuntimeError("429 請求太多：%s" % r.text[:200].replace("\n", " "))
             r.raise_for_status()
             return r
         except Exception as e:                  # noqa: BLE001
             last = e
-            print("第 %d 次連線失敗：%s" % (i + 1, str(e)[:120]))
+            print("第 %d 次連線失敗：%s" % (i + 1, str(e)[:200]))
+            if str(e).startswith("429"):
+                break                           # 限流時馬上重試只會更糟，交給上層沿用舊資料
             time.sleep(3 * (i + 1))
     raise last
 
@@ -154,6 +164,7 @@ def load_camps(url=DB_URL):
 # 用了快取就留下 .cache/FALLBACK，workflow 最後一步看到它會故意失敗，讓 GitHub 寄信通知。
 CACHE_DIR = os.path.join(HERE, "..", ".cache")
 CACHE_FILE = os.path.join(CACHE_DIR, "camps.json")
+OM_CACHE = os.path.join(CACHE_DIR, "om.json")     # 2026-11-14：國際模式快取（加密存在 Actions 快取）
 
 
 def partial(what, e):
@@ -321,31 +332,40 @@ def _median(vals):
     return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
 
 
-def fetch_gust_ens(camps):
-    """多模式最大陣風（m/s）的中位數。營地先併成 0.1 度格點（約 11 公里，比模式格子還小）以減少請求。
-    抓不到就回空的，沿用原本單一模式的陣風。"""
+def _cell(c):
+    """營地所在的 0.1 度格子（約 10 公里）。同一格的營地共用一份國際模式資料。"""
+    return "%.1f,%.1f" % (round(c["la"], 1), round(c["lo"], 1))
+
+
+def _om_cells(camps):
     cells = {}
     for c in camps:
-        cells.setdefault((round(c["la"], 1), round(c["lo"], 1)), []).append(c["n"])
-    keys = list(cells)
+        cells.setdefault(_cell(c), []).append(c)
+    return cells
+
+
+def _om_pace(weight):
+    """2026-11-14：免費版每分鐘上限 600 次（一個座標算一次、多個模式各算一次），照份量慢慢送。"""
+    time.sleep(max(0.6, weight * 60.0 / OM_PER_MIN))
+
+
+def fetch_gust_ens(cells):
+    """多模式最大陣風（m/s）的中位數，每個 0.1 度格子抓一次（格子中心）。
+    抓不到就丟出錯誤，由 get_om() 決定要不要沿用上一次的資料。"""
+    keys = sorted(cells)
     got = {}
     for i in range(0, len(keys), GUST_BATCH):
         chunk = keys[i:i + GUST_BATCH]
         params = {
-            "latitude": ",".join("%.1f" % k[0] for k in chunk),
-            "longitude": ",".join("%.1f" % k[1] for k in chunk),
+            "latitude": ",".join(k.split(",")[0] for k in chunk),
+            "longitude": ",".join(k.split(",")[1] for k in chunk),
             "daily": "wind_gusts_10m_max,wind_speed_10m_max",   # 2026-10-21：平均風也取中間值
             "models": ",".join(GUST_MODELS),
             "wind_speed_unit": "ms",
             "timezone": "Asia/Taipei",
             "forecast_days": QPF_DAYS,
         }
-        try:
-            js = _get(QPF_URL, params, 120).json()
-        except Exception as e:                  # noqa: BLE001
-            print("多模式陣風抓取失敗，這次沿用單一模式：%s" % e)
-            partial("多模式陣風", e)
-            return {}
+        js = _get(QPF_URL, params, 120).json()
         rows = js if isinstance(js, list) else [js]
         if len(rows) != len(chunk):
             print("多模式陣風筆數對不上（%d vs %d），這批略過" % (len(rows), len(chunk)))
@@ -362,40 +382,37 @@ def fetch_gust_ens(camps):
                     if wv:
                         rec[day]["wm"] = round(_median(wv), 1)
             got[k] = rec
-        time.sleep(1.0)
-    out = {}
-    for k, names in cells.items():
-        for n in names:
-            out[n] = got.get(k) or {}
-    print("多模式陣風：%d 個格點、%d 個營地有資料" % (len(got), sum(1 for v in out.values() if v)))
-    return out
+        if i + GUST_BATCH < len(keys):
+            _om_pace(len(chunk) * len(GUST_MODELS))
+    print("多模式陣風：%d/%d 個格子" % (sum(1 for v in got.values() if v), len(keys)))
+    return got
 
 
-def fetch_qpf(camps):
-    """逐日預估雨量（毫米）。抓不到就回空的，不讓整批失敗。"""
+def fetch_qpf(cells):
+    """逐日預估雨量（毫米）等國際模式資料，每個 0.1 度格子抓一次。
+    抓的位置用格子裡營地的平均座標（比格子中心更貼近營地，海邊的格子也不會落在海上）。
+    回傳 {格子: {"e": 模式格點高度, "d": {日期: {...}}}}；抓不到就丟出錯誤。"""
+    keys = sorted(cells)
     out = {}
-    for i in range(0, len(camps), QPF_BATCH):
-        chunk = camps[i:i + QPF_BATCH]
+    for i in range(0, len(keys), QPF_BATCH):
+        chunk = keys[i:i + QPF_BATCH]
+        pts = [(sum(c["la"] for c in cells[k]) / len(cells[k]),
+                sum(c["lo"] for c in cells[k]) / len(cells[k])) for k in chunk]
         params = {
-            "latitude": ",".join("%.4f" % c["la"] for c in chunk),
-            "longitude": ",".join("%.4f" % c["lo"] for c in chunk),
+            "latitude": ",".join("%.4f" % p[0] for p in pts),
+            "longitude": ",".join("%.4f" % p[1] for p in pts),
             "daily": ("precipitation_sum,precipitation_probability_max,"
                       "temperature_2m_max,temperature_2m_min,wind_speed_10m_max,"
                       "wind_gusts_10m_max"),   # 2026-10-21：達哥要風力以陣風為主
             "timezone": "Asia/Taipei",
             "forecast_days": QPF_DAYS,
         }
-        try:
-            js = _get(QPF_URL, params, 90).json()
-        except Exception as e:                  # noqa: BLE001
-            print("預估雨量抓取失敗，這次略過：%s" % e)
-            partial("預估雨量（國際模式）", e)
-            return {}
+        js = _get(QPF_URL, params, 90).json()
         rows = js if isinstance(js, list) else [js]
         if len(rows) != len(chunk):
             print("預估雨量筆數對不上（%d vs %d），這批略過" % (len(rows), len(chunk)))
             continue
-        for c, r in zip(chunk, rows):
+        for k, r in zip(chunk, rows):
             d = r.get("daily") or {}
             days = d.get("time") or []
             if not days:
@@ -410,21 +427,131 @@ def fetch_qpf(camps):
             ws = col("wind_speed_10m_max")
             gu = col("wind_gusts_10m_max")
             rec = {}
-            for k, day in enumerate(days):
+            for j, day in enumerate(days):
                 rec[day] = {
-                    "mm": _r(mm[k], 1),
-                    "pop": _i(pop[k]),
-                    "hi": _r(tmx[k], 1),
-                    "lo": _r(tmn[k], 1),
+                    "mm": _r(mm[j], 1),
+                    "pop": _i(pop[j]),
+                    "hi": _r(tmx[j], 1),
+                    "lo": _r(tmn[j], 1),
                     # Open-Meteo 的風速預設是 km/h，換成 m/s 才跟氣象署一致
-                    "ws": None if ws[k] is None else round(float(ws[k]) / 3.6, 1),
+                    "ws": None if ws[j] is None else round(float(ws[j]) / 3.6, 1),
                     # 最大陣風，一樣從 km/h 換成 m/s
-                    "gu": None if gu[k] is None else round(float(gu[k]) / 3.6, 1),
+                    "gu": None if gu[j] is None else round(float(gu[j]) / 3.6, 1),
                 }
-            out[c["n"]] = {"e": _i(r.get("elevation")), "d": rec}
-        time.sleep(0.6)
-    print("預估雨量：%d/%d 個營地" % (len(out), len(camps)))
+            out[k] = {"e": _i(r.get("elevation")), "d": rec}
+        if i + QPF_BATCH < len(keys):
+            _om_pace(len(chunk))
+    print("預估雨量：%d/%d 個格子（%d 個營地）" % (len(out), len(keys),
+                                          sum(len(cells[k]) for k in out)))
     return out
+
+
+def _om_load():
+    try:
+        with open(OM_CACHE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:                           # noqa: BLE001
+        return {}
+
+
+def _om_save(cache):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(OM_CACHE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, separators=(",", ":"))
+
+
+def _om_age_h(ts, now):
+    if not ts:
+        return None
+    try:
+        return (now - datetime.fromisoformat(ts)).total_seconds() / 3600.0
+    except Exception:                           # noqa: BLE001
+        return None
+
+
+def get_om(camps, now=None):
+    """2026-11-14 達哥：國際模式（Open-Meteo）改成「10 公里一格＋一天抓 4 次＋抓不到沿用上一次」。
+      - 同一個 0.1 度格子的營地共用一份資料（2,042 個營地 → 約 283 格）
+      - 上一次成功不到 OM_EVERY_H 小時就直接沿用（天氣每 3 小時更新一次 → 國際模式約一天抓 4 次）
+      - 被拒絕後 OM_RETRY_MIN 分鐘內不再去抓，避免失敗重跑一直打過去
+      - 抓不到時沿用 OM_KEEP_H 小時內最後一次成功的資料；連這個都沒有才算這次失敗（PARTIAL）
+    快取 .cache/om.json 跟營地快取一樣只放在 Actions 快取裡（加密），不進公開的儲存庫。
+    回傳 (每個營地的 qpf, 說明)。"""
+    now = now or datetime.now(TPE)
+    cells = _om_cells(camps)
+    cache = _om_load()
+    stamp = now.isoformat(timespec="minutes")
+
+    def need(kind):
+        age = _om_age_h(cache.get(kind + "t"), now)
+        return age is None or age >= OM_EVERY_H
+
+    want_q, want_e = need("q"), need("e")
+    fail_age = _om_age_h(cache.get("ft"), now)
+    if (want_q or want_e) and fail_age is not None and fail_age * 60 < OM_RETRY_MIN:
+        print("國際模式 %d 分鐘前才被拒絕過（%s），這次先不抓，沿用上一次的資料"
+              % (int(fail_age * 60), cache.get("fr", "")))
+        want_q = want_e = False
+    if not (want_q or want_e):
+        print("國際模式：預估雨量是 %s 抓的、多模式陣風是 %s 抓的，這次沿用"
+              % (cache.get("qt"), cache.get("et")))
+
+    if want_q:
+        try:
+            q = fetch_qpf(cells)
+            if len(q) < len(cells) * 0.9:
+                raise RuntimeError("只抓到 %d/%d 個格子" % (len(q), len(cells)))
+            cache["q"], cache["qt"] = q, stamp
+            cache.pop("ft", None)
+            cache.pop("fr", None)
+        except Exception as e:                  # noqa: BLE001
+            print("預估雨量抓取失敗：%s" % str(e)[:300])
+            cache["ft"], cache["fr"] = stamp, str(e)[:200]
+            want_e = False                      # 已經被拒絕了，陣風這次也先不抓
+    if want_e:
+        try:
+            g = fetch_gust_ens(cells)
+            if sum(1 for v in g.values() if v) < len(cells) * 0.9:
+                raise RuntimeError("只抓到 %d/%d 個格子" % (sum(1 for v in g.values() if v), len(cells)))
+            cache["e"], cache["et"] = g, stamp
+        except Exception as e:                  # noqa: BLE001
+            print("多模式陣風抓取失敗：%s" % str(e)[:300])
+            cache["ft"], cache["fr"] = stamp, str(e)[:200]
+    _om_save(cache)
+
+    info = {"qpfTime": None, "gustTime": None}
+    qc, ec = {}, {}
+    qa, ea = _om_age_h(cache.get("qt"), now), _om_age_h(cache.get("et"), now)
+    if qa is not None and qa <= OM_KEEP_H:
+        qc, info["qpfTime"] = cache.get("q") or {}, cache.get("qt")
+    else:
+        partial("預估雨量（國際模式）", "%d 小時內都沒有成功抓到：%s"
+                % (OM_KEEP_H, cache.get("fr", "")))
+    if ea is not None and ea <= OM_KEEP_H:
+        ec, info["gustTime"] = cache.get("e") or {}, cache.get("et")
+    else:
+        partial("多模式陣風", "%d 小時內都沒有成功抓到：%s" % (OM_KEEP_H, cache.get("fr", "")))
+
+    qpf = {}
+    for k, cs in cells.items():
+        rec = qc.get(k)
+        if not rec:
+            continue
+        ens = ec.get(k) or {}
+        d = {}
+        for dt, v in (rec.get("d") or {}).items():
+            v = dict(v)
+            g = ens.get(dt)
+            if g:
+                v["gu"], v["gn"] = g["gu"], g["gn"]
+                if g.get("wm") is not None:
+                    v["wm"] = g["wm"]
+            d[dt] = v
+        for c in cs:
+            qpf[c["n"]] = {"e": rec.get("e"), "d": d}
+    print("國際模式：%d 個格子、%d 個營地有預估雨量（%s）；多模式陣風 %s"
+          % (len(qc), len(qpf), info["qpfTime"], info["gustTime"]))
+    return qpf, info
 
 
 def _norm_county(s):
@@ -1272,24 +1399,7 @@ def main():
         rain, rain_time = fetch_rain(key)
         quakes = fetch_quakes(key)
         warns = fetch_warnings(key)
-        qpf = fetch_qpf(camps)
-        # 2026-10-21：陣風改用多模式中間值（抓不到就保留單一模式的值）
-        try:
-            ens = fetch_gust_ens(camps)
-        except Exception as e:                  # noqa: BLE001
-            print("多模式陣風出錯，沿用單一模式：%s" % e)
-            partial("多模式陣風", e)
-            ens = {}
-        for nm, days in ens.items():
-            q = qpf.get(nm)
-            if not q or not days:
-                continue
-            for dt, v in days.items():
-                if dt in (q.get("d") or {}):
-                    q["d"][dt]["gu"] = v["gu"]
-                    q["d"][dt]["gn"] = v["gn"]
-                    if v.get("wm") is not None:
-                        q["d"][dt]["wm"] = v["wm"]
+        qpf, ominfo = get_om(camps)
         stamp = datetime.now(TPE).isoformat(timespec="minutes")
         payload = compose(camps, locs, elev, stamp,
                           rain, rain_time, quakes, warns, qpf)
@@ -1301,6 +1411,11 @@ def main():
             print("::warning::雨量格點（raingrid.json）這次沒產生：%s" % str(e)[:300])
         if camp_src:
             payload["campSource"] = camp_src
+        # 2026-11-14：國際模式是什麼時候抓的（沿用上一次時會比 generated 早）
+        payload["qpfTime"] = ominfo["qpfTime"]
+        payload["gustTime"] = ominfo["gustTime"]
+        if raingrid:
+            raingrid["qpfTime"] = ominfo["qpfTime"]
 
     out = os.path.abspath(args.out)
     with open(out, "w", encoding="utf-8") as f:
