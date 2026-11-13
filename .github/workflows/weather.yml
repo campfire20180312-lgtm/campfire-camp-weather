@@ -73,6 +73,23 @@ jobs:
             openssl enc -d -aes-256-cbc -pbkdf2 -pass env:K -in .cache/camps.enc -out .cache/camps.json || rm -f .cache/camps.json
           fi
 
+      # 2026-11-14 達哥：國際模式一天抓 4 次、抓不到沿用上一次。快取有營地附近的座標，一樣加密、不進儲存庫。
+      - name: 取回國際模式快取
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/om.enc
+          key: om-${{ github.run_id }}
+          restore-keys: om-
+
+      - name: 解密國際模式快取
+        env:
+          K: ${{ secrets.CWA_API_KEY }}
+        run: |
+          mkdir -p .cache
+          if [ -f .cache/om.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:K -in .cache/om.enc -out .cache/om.json || rm -f .cache/om.json
+          fi
+
       - name: 抓氣象署預報並產生 weather.json
         env:
           CWA_API_KEY_RAW: ${{ secrets.CWA_API_KEY }}
@@ -124,6 +141,25 @@ jobs:
         with:
           path: .cache/camps.enc
           key: camps-${{ github.run_id }}
+
+      # 被拒絕的時間也要記住（60 分鐘內不再去抓），所以前面的步驟失敗也照樣存
+      - name: 加密國際模式快取
+        id: omenc
+        if: always()
+        env:
+          K: ${{ secrets.CWA_API_KEY }}
+        run: |
+          if [ -f .cache/om.json ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:K -in .cache/om.json -out .cache/om.enc
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 存國際模式快取
+        if: always() && steps.omenc.outputs.ok == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/om.enc
+          key: om-${{ github.run_id }}
 
       # 2026-10-24 達哥：更新失敗要 30 分鐘後重跑直到成功。
       # 有哪一項資料沒抓到（國際模式雨量／陣風、雨量站、特報、地震），這次就算失敗，weather-retry.yml 會在 30 分鐘後重跑。
