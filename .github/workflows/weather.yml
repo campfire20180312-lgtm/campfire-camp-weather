@@ -116,6 +116,8 @@ jobs:
           if [ -f docs/raingrid.json ]; then git add docs/raingrid.json; fi
           # 2026-10-24：逐 3 小時預報
           if [ -f docs/wx3h.json ]; then git add docs/wx3h.json; fi
+          # 2026-11-14：營地天氣逐時雨量
+          if [ -f docs/rainhr.json ]; then git add docs/rainhr.json; fi
           git diff --staged --quiet || git commit -m "weather: $(date -u +%Y-%m-%dT%H:%MZ)"
           # 2026-10-24：空位、路線的 workflow 也會推，撞到就先拉最新再推
           for i in 1 2 3; do
