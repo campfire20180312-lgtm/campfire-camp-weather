@@ -61,6 +61,8 @@ OM_EVERY_H = 5        # 上一次成功不到 5 小時就沿用（天氣每 3 �
 OM_KEEP_H = 24        # 抓不到時沿用 24 小時內最後一次成功的資料
 OM_RETRY_MIN = 60     # 被拒絕後 60 分鐘內不再去抓
 OM_PER_MIN = 480      # 每分鐘最多送幾次（免費版上限 600，留一點餘裕）
+# 2026-11-14 逐時雨量：逐時雨量留抓取時間前 3 小時到後 102 小時（抓不到沿用 24 小時時，頁面上還有未來 3 天可看）
+HR_BEFORE, HR_AFTER = 3, 102
 
 # 環境氣溫遞減率（°C / 100m）。營火部落資料庫既有說明用 0.6，這裡保持一致。
 # 乾空氣約 1.0、飽和空氣約 0.5，台灣山區多濕，0.55~0.65 都算合理。
@@ -404,6 +406,8 @@ def fetch_qpf(cells):
             "daily": ("precipitation_sum,precipitation_probability_max,"
                       "temperature_2m_max,temperature_2m_min,wind_speed_10m_max,"
                       "wind_gusts_10m_max"),   # 2026-10-21：達哥要風力以陣風為主
+            # 2026-11-14 逐時雨量：同一個請求多要逐時雨量與降雨機率（6＋2＝8 個項目、14 天，Open-Meteo 還是算 1 次）
+            "hourly": "precipitation,precipitation_probability",
             "timezone": "Asia/Taipei",
             "forecast_days": QPF_DAYS,
         }
@@ -439,11 +443,60 @@ def fetch_qpf(cells):
                     "gu": None if gu[j] is None else round(float(gu[j]) / 3.6, 1),
                 }
             out[k] = {"e": _i(r.get("elevation")), "d": rec}
+            hr = _hourly(r.get("hourly") or {})   # 2026-11-14 逐時雨量
+            if hr:
+                out[k]["h"] = hr
         if i + QPF_BATCH < len(keys):
             _om_pace(len(chunk))
     print("預估雨量：%d/%d 個格子（%d 個營地）" % (len(out), len(keys),
                                           sum(len(cells[k]) for k in out)))
     return out
+
+
+def _hourly(h):
+    """2026-11-14 逐時雨量：Open-Meteo 的逐時資料 → {t0: 第一個小時（台灣時間）, p: [雨量×10 的整數], q: [降雨機率]}。
+    每一格是「前一小時」的累積，t0+1 小時那格是 t0 到 t0+1 小時下的雨。只留抓取時間前後 HR_BEFORE～HR_AFTER 小時。"""
+    ts = h.get("time") or []
+    if not ts:
+        return None
+    now = datetime.now(TPE).replace(minute=0, second=0, microsecond=0)
+    lo, hi = now - timedelta(hours=HR_BEFORE), now + timedelta(hours=HR_AFTER)
+    pr, pq = h.get("precipitation") or [], h.get("precipitation_probability") or []
+    t0, p, q = None, [], []
+    for j, t in enumerate(ts):
+        try:
+            dt = datetime.fromisoformat(t).replace(tzinfo=TPE)
+        except Exception:                       # noqa: BLE001
+            continue
+        if dt < lo or dt > hi:
+            continue
+        if t0 is None:
+            t0 = dt
+        v = pr[j] if j < len(pr) else None
+        w = pq[j] if j < len(pq) else None
+        p.append(None if v is None else int(round(float(v) * 10)))
+        q.append(_i(w))
+    if t0 is None or not any(v is not None for v in p):
+        return None
+    return {"t0": t0.isoformat(timespec="minutes"), "p": p, "q": q}
+
+
+def compose_rainhr(camps, info, generated):
+    """2026-11-14 逐時雨量：天氣頁營地天氣「逐 3 小時預報」那排下面的逐時雨量。
+    格式：{generated, qpfTime, src, k: [格子], c: [{t0, p, q}], m: {營地編號: 第幾個格子}}；沒有營地編號的用名稱。"""
+    hc = info.get("hr") or {}
+    keys = sorted(k for k, v in hc.items() if v)
+    if not keys:
+        return None
+    idx = {k: i for i, k in enumerate(keys)}
+    m = {}
+    for c in camps:
+        i = idx.get(_cell(c))
+        if i is not None:
+            m[str(c.get("id") if c.get("id") is not None else c["n"])] = i
+    return {"generated": generated, "qpfTime": info.get("qpfTime"),
+            "src": "Open-Meteo（ECMWF 等全球模式）逐時雨量，非中央氣象署預報",
+            "k": keys, "c": [hc[k] for k in keys], "m": m}
 
 
 def _om_load():
@@ -487,6 +540,9 @@ def get_om(camps, now=None):
         return age is None or age >= OM_EVERY_H
 
     want_q, want_e = need("q"), need("e")
+    if not want_q and cache.get("q") and not any((v or {}).get("h") for v in cache["q"].values()):   # 2026-11-14 逐時雨量
+        print("國際模式：上一次的預估雨量沒有逐時資料，這次提早重抓一次")
+        want_q = True
     fail_age = _om_age_h(cache.get("ft"), now)
     if (want_q or want_e) and fail_age is not None and fail_age * 60 < OM_RETRY_MIN:
         print("國際模式 %d 分鐘前才被拒絕過（%s），這次先不抓，沿用上一次的資料"
@@ -519,11 +575,12 @@ def get_om(camps, now=None):
             cache["ft"], cache["fr"] = stamp, str(e)[:200]
     _om_save(cache)
 
-    info = {"qpfTime": None, "gustTime": None}
+    info = {"qpfTime": None, "gustTime": None, "hr": {}}
     qc, ec = {}, {}
     qa, ea = _om_age_h(cache.get("qt"), now), _om_age_h(cache.get("et"), now)
     if qa is not None and qa <= OM_KEEP_H:
         qc, info["qpfTime"] = cache.get("q") or {}, cache.get("qt")
+        info["hr"] = {k: v.get("h") for k, v in qc.items() if v.get("h")}   # 2026-11-14 逐時雨量
     else:
         partial("預估雨量（國際模式）", "%d 小時內都沒有成功抓到：%s"
                 % (OM_KEEP_H, cache.get("fr", "")))
@@ -1353,6 +1410,7 @@ def main():
 
     towns = None
     raingrid = None
+    rainhr = None   # 2026-11-14 逐時雨量
     if args.demo:
         from demo_data import make_demo
         payload = make_demo(LAPSE, adjust, wind_chill)
@@ -1416,6 +1474,10 @@ def main():
         payload["gustTime"] = ominfo["gustTime"]
         if raingrid:
             raingrid["qpfTime"] = ominfo["qpfTime"]
+        try:   # 2026-11-14 逐時雨量：出錯不影響 weather.json
+            rainhr = compose_rainhr(camps, ominfo, stamp)
+        except Exception as e:                  # noqa: BLE001
+            print("::warning::逐時雨量（rainhr.json）這次沒產生：%s" % str(e)[:300])
 
     out = os.path.abspath(args.out)
     with open(out, "w", encoding="utf-8") as f:
@@ -1434,6 +1496,12 @@ def main():
             json.dump(raingrid, f, ensure_ascii=False, separators=(",", ":"))
         print("已寫入 %s（%d 個格點、%d 天，%.1f KB）" %
               (gout, len(raingrid["c"]), len(raingrid["dates"]), os.path.getsize(gout) / 1024))
+    if rainhr:   # 2026-11-14 逐時雨量
+        hout = os.path.join(os.path.dirname(out), "rainhr.json")
+        with open(hout, "w", encoding="utf-8") as f:
+            json.dump(rainhr, f, ensure_ascii=False, separators=(",", ":"))
+        print("已寫入 %s（%d 個格子、%d 個營地，%.1f KB）" %
+              (hout, len(rainhr["k"]), len(rainhr["m"]), os.path.getsize(hout) / 1024))
 
 
 if __name__ == "__main__":
