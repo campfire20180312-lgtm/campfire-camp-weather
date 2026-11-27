@@ -499,6 +499,20 @@ def compose_rainhr(camps, info, generated):
             "k": keys, "c": [hc[k] for k in keys], "m": m}
 
 
+def _gust_floor(days):
+    """2026-11-27 陣風不小於平均風：陣風補到至少等於當天最大的平均風，補過的那天標 gl=1；回傳補了幾天。"""
+    n = 0
+    for d in days:
+        g = d.get("gu")
+        if g is None:
+            continue
+        m = max([v for v in (d.get("wsd"), d.get("wsn"), d.get("wm")) if v is not None] or [None], key=lambda x: -1 if x is None else x)
+        if m is not None and g < m:
+            d["gu"], d["gl"] = round(float(m), 1), 1
+            n += 1
+    return n
+
+
 def _om_load():
     try:
         with open(OM_CACHE, encoding="utf-8") as f:
@@ -1149,6 +1163,9 @@ def compose(camps, locs, elev, generated, rain=None, rain_time=None, quakes=None
             w = camp_warnings(c, warns)
             if w:
                 out_camps[-1]["warn"] = w
+    gfix = sum(_gust_floor(c["days"]) for c in out_camps)   # 2026-11-27 陣風不小於平均風
+    if gfix:
+        print("陣風比平均風小、補到跟平均風一樣：%d 個營地天" % gfix)
     check(out_camps)
     return {
         "generated": generated,
