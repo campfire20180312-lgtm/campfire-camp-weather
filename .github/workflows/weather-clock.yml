@@ -8,6 +8,7 @@ name: 天氣更新準時鐘
 #   2. 失敗重跑（2026-10-25 起由鐘接手）：最近一次天氣更新失敗、已經過 30 分鐘、也沒有在跑，就重跑，直到成功。
 #      原因：鐘觸發的那幾次是 GitHub 機器人觸發的，失敗時 weather-retry.yml 不會被叫起來
 #      （10/25 02:40 那班氣象署連不上失敗，就沒有重跑）。
+#   3. 風場（2026-11-27 起）：台灣時間每 3 小時的 30 分（09:30、12:30…）觸發「風場圖資料」，沒有在跑才觸發。
 # 底下的每小時排程是備援：鐘斷掉（例如 GitHub 故障）時，一小時內自己接回來；鐘還在跑時，備援那次馬上結束。
 # 公開的儲存庫，GitHub 提供的執行時間不收費。
 on:
@@ -47,6 +48,14 @@ jobs:
           tw() { TZ=Asia/Taipei date -d "@$1" '+%m/%d %H:%M'; }
           tick() {
             now=$(date -u +%s)
+            # 2026-11-27 達哥：風場也由鐘準時觸發（風場自己的排程一天只跑約 3 次，資料常落後一批）。
+            # 台灣時間 09:30、12:30、15:30、18:30、21:30、00:30、03:30、06:30；同一批 build_wind.py 會跳過，幾秒就結束
+            wm=$(date -u +%M); wh=$(date -u +%H)
+            if [ "$((10#$wm))" = "30" ] && [ "$((10#$wh % 3))" = "1" ]; then
+              wb=$(gh run list -R "$R" -w wind.yml -L 5 --json status -q '[.[] | select(.status != "completed")] | length') || wb=1
+              if [ "${wb:-0}" = "0" ]; then gh workflow run wind.yml -R "$R" && echo "$(tw $now) 風場班次：觸發風場更新" || true
+              else echo "$(tw $now) 風場正在跑，不另外觸發"; fi
+            fi
             runs=$(gh run list -R "$R" -w weather.yml -L 10 --json status,conclusion,updatedAt) || return 0
             busy=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
             if [ "${busy:-0}" != "0" ]; then echo "$(tw $now) 天氣更新正在跑"; return 0; fi
